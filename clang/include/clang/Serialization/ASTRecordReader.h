@@ -156,6 +156,9 @@ public:
   // Reads a concept reference from the given record.
   ConceptReference *readConceptReference();
 
+  // Reads a splice specifier from the given record.
+  SpliceSpecifier *readSpliceSpecifierRef();
+
   /// Reads a declarator info from the given record, advancing Idx.
   TypeSourceInfo *readTypeSourceInfo();
 
@@ -278,8 +281,11 @@ public:
   /// Read an OpenACC clause, advancing Idx.
   OpenACCClause *readOpenACCClause();
 
-  /// Read a list of OpenACC clauses into the passed SmallVector.
+  /// Read a list of OpenACC clauses into the passed SmallVector, during
+  /// statement reading.
   void readOpenACCClauseList(MutableArrayRef<const OpenACCClause *> Clauses);
+
+  void readOpenACCRoutineDeclAttr(OpenACCRoutineDeclAttr *A);
 
   /// Read a source location, advancing Idx.
   SourceLocation readSourceLocation(LocSeq *Seq = nullptr) {

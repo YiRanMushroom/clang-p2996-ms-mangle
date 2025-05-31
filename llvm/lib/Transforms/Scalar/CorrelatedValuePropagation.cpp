@@ -288,24 +288,35 @@ static bool processICmp(ICmpInst *Cmp, LazyValueInfo *LVI) {
   if (!Cmp->getOperand(0)->getType()->isIntOrIntVectorTy())
     return false;
 
-  if (!Cmp->isSigned())
+  if (!Cmp->isSigned() && (!Cmp->isUnsigned() || Cmp->hasSameSign()))
     return false;
 
-  ICmpInst::Predicate UnsignedPred =
-      ConstantRange::getEquivalentPredWithFlippedSignedness(
-          Cmp->getPredicate(),
-          LVI->getConstantRangeAtUse(Cmp->getOperandUse(0),
-                                     /*UndefAllowed*/ true),
-          LVI->getConstantRangeAtUse(Cmp->getOperandUse(1),
-                                     /*UndefAllowed*/ true));
+  bool Changed = false;
 
-  if (UnsignedPred == ICmpInst::Predicate::BAD_ICMP_PREDICATE)
-    return false;
+  ConstantRange CR1 = LVI->getConstantRangeAtUse(Cmp->getOperandUse(0),
+                                                 /*UndefAllowed=*/false),
+                CR2 = LVI->getConstantRangeAtUse(Cmp->getOperandUse(1),
+                                                 /*UndefAllowed=*/false);
 
-  ++NumSICmps;
-  Cmp->setPredicate(UnsignedPred);
+  if (Cmp->isSigned()) {
+    ICmpInst::Predicate UnsignedPred =
+        ConstantRange::getEquivalentPredWithFlippedSignedness(
+            Cmp->getPredicate(), CR1, CR2);
 
-  return true;
+    if (UnsignedPred == ICmpInst::Predicate::BAD_ICMP_PREDICATE)
+      return false;
+
+    ++NumSICmps;
+    Cmp->setPredicate(UnsignedPred);
+    Changed = true;
+  }
+
+  if (ConstantRange::areInsensitiveToSignednessOfICmpPredicate(CR1, CR2)) {
+    Cmp->setSameSign();
+    Changed = true;
+  }
+
+  return Changed;
 }
 
 /// See if LazyValueInfo's ability to exploit edge conditions or range
@@ -1201,6 +1212,34 @@ static bool processAnd(BinaryOperator *BinOp, LazyValueInfo *LVI) {
   return true;
 }
 
+static bool processTrunc(TruncInst *TI, LazyValueInfo *LVI) {
+  if (TI->hasNoSignedWrap() && TI->hasNoUnsignedWrap())
+    return false;
+
+  ConstantRange Range =
+      LVI->getConstantRangeAtUse(TI->getOperandUse(0), /*UndefAllowed=*/false);
+  uint64_t DestWidth = TI->getDestTy()->getScalarSizeInBits();
+  bool Changed = false;
+
+  if (!TI->hasNoUnsignedWrap()) {
+    if (Range.getActiveBits() <= DestWidth) {
+      TI->setHasNoUnsignedWrap(true);
+      ++NumNUW;
+      Changed = true;
+    }
+  }
+
+  if (!TI->hasNoSignedWrap()) {
+    if (Range.getMinSignedBits() <= DestWidth) {
+      TI->setHasNoSignedWrap(true);
+      ++NumNSW;
+      Changed = true;
+    }
+  }
+
+  return Changed;
+}
+
 static bool runImpl(Function &F, LazyValueInfo *LVI, DominatorTree *DT,
                     const SimplifyQuery &SQ) {
   bool FnChanged = false;
@@ -1263,6 +1302,9 @@ static bool runImpl(Function &F, LazyValueInfo *LVI, DominatorTree *DT,
         break;
       case Instruction::And:
         BBChanged |= processAnd(cast<BinaryOperator>(&II), LVI);
+        break;
+      case Instruction::Trunc:
+        BBChanged |= processTrunc(cast<TruncInst>(&II), LVI);
         break;
       }
     }

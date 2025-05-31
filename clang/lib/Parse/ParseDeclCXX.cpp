@@ -18,11 +18,11 @@
 #include "clang/Basic/AttributeCommonInfo.h"
 #include "clang/Basic/Attributes.h"
 #include "clang/Basic/CharInfo.h"
+#include "clang/Basic/DiagnosticParse.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Lex/LiteralSupport.h"
-#include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/RAIIObjectsForParser.h"
 #include "clang/Sema/DeclSpec.h"
@@ -83,26 +83,16 @@ Parser::DeclGroupPtrTy Parser::ParseNamespace(DeclaratorContext Context,
 
   ParsedAttributes attrs(AttrFactory);
 
-  auto ReadAttributes = [&] {
-    bool MoreToParse;
-    do {
-      MoreToParse = false;
-      if (Tok.is(tok::kw___attribute)) {
-        ParseGNUAttributes(attrs);
-        MoreToParse = true;
-      }
-      if (getLangOpts().CPlusPlus11 && isCXX11AttributeSpecifier()) {
+  while (MaybeParseGNUAttributes(attrs) || isAllowedCXX11AttributeSpecifier()) {
+    if (isAllowedCXX11AttributeSpecifier()) {
+      if (getLangOpts().CPlusPlus11)
         Diag(Tok.getLocation(), getLangOpts().CPlusPlus17
                                     ? diag::warn_cxx14_compat_ns_enum_attribute
                                     : diag::ext_ns_enum_attribute)
             << 0 /*namespace*/;
-        ParseCXX11Attributes(attrs);
-        MoreToParse = true;
-      }
-    } while (MoreToParse);
-  };
-
-  ReadAttributes();
+      ParseCXX11Attributes(attrs);
+    }
+  }
 
   if (Tok.is(tok::identifier)) {
     Ident = Tok.getIdentifierInfo();
@@ -128,7 +118,9 @@ Parser::DeclGroupPtrTy Parser::ParseNamespace(DeclaratorContext Context,
     }
   }
 
-  ReadAttributes();
+  DiagnoseAndSkipCXX11Attributes();
+  MaybeParseGNUAttributes(attrs);
+  DiagnoseAndSkipCXX11Attributes();
 
   SourceLocation attrLoc = attrs.Range.getBegin();
 
@@ -258,32 +250,6 @@ Parser::DeclGroupPtrTy Parser::ParseNamespace(DeclaratorContext Context,
 
   return Actions.ConvertDeclToDeclGroup(NamespcDecl,
                                         ImplicitUsingDirectiveDecl);
-}
-
-/// ParseNamespaceName - Parse the name of a namespace.
-Decl *Parser::ParseNamespaceName(CXXScopeSpec &SS, SourceLocation &IdentLoc) {
-  // Will be one of:
-  // - A nested-names-specifier followed by an identifier, or
-  // - An unqualified splice (C++2c, P2996).
-
-  ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/nullptr,
-                                 /*ObjectHadErrors=*/false,
-                                 /*EnteringContext=*/false,
-                                 /*MayBePseudoDestructor=*/nullptr,
-                                 /*IsTypename=*/false,
-                                 /*LastII=*/nullptr,
-                                 /*OnlyNamespace=*/false);
-
-  if (Tok.is(tok::identifier)) {
-    IdentifierInfo *II = Tok.getIdentifierInfo();
-    IdentLoc = ConsumeToken();
-    return Actions.ActOnNamespaceName(getCurScope(), SS, II, IdentLoc);
-  } else if (SS.isValid() &&
-             SS.getScopeRep()->getKind() == NestedNameSpecifier::Global) {
-    return Actions.getASTContext().getTranslationUnitDecl();
-  }
-
-  return nullptr;
 }
 
 /// ParseInnerNamespace - Parse the contents of a namespace.
@@ -504,6 +470,15 @@ Decl *Parser::ParseLinkage(ParsingDeclSpec &DS, DeclaratorContext Context) {
 Decl *Parser::ParseExportDeclaration() {
   assert(Tok.is(tok::kw_export));
   SourceLocation ExportLoc = ConsumeToken();
+
+  if (Tok.is(tok::code_completion)) {
+    cutOffParsing();
+    Actions.CodeCompletion().CodeCompleteOrdinaryName(
+        getCurScope(), PP.isIncrementalProcessingEnabled()
+                           ? SemaCodeCompletion::PCC_TopLevelOrExpression
+                           : SemaCodeCompletion::PCC_Namespace);
+    return nullptr;
+  }
 
   ParseScope ExportScope(this, Scope::DeclScope);
   Decl *ExportDecl = Actions.ActOnStartExportDecl(
@@ -807,6 +782,10 @@ Parser::DeclGroupPtrTy Parser::ParseUsingDeclaration(
       SkipUntil(tok::semi);
       return nullptr;
     }
+
+    SourceLocation TypenameKWLoc;
+    TryConsumeToken(tok::kw_typename, TypenameKWLoc);
+
     CXXScopeSpec SS;
     if (ParseOptionalCXXScopeSpecifier(SS, /*ParsedType=*/nullptr,
                                        /*ObectHasErrors=*/false,
@@ -826,14 +805,16 @@ Parser::DeclGroupPtrTy Parser::ParseUsingDeclaration(
       return nullptr;
     }
 
-    if (Tok.is(tok::annot_splice)) {
+    if (Tok.is(tok::annot_typename)) {
       SourceLocation SpliceLoc = Tok.getLocation();
-      TypeResult TR = ParseCXXSpliceAsType(/*AllowDependent=*/true,
-                                           /*Complain=*/true);
+      // Dependent type will be diagnosed by ActOnUsingEnumDeclaration.
+      TypeResult TR = getTypeAnnotation(Tok);
       if (TR.isInvalid()) {
         SkipUntil(tok::semi);
         return nullptr;
       }
+      ConsumeAnnotationToken();
+
       TypeSourceInfo *TSI;
       QualType EnumTy = Actions.GetTypeFromParser(TR.get(), &TSI);
       if (EnumTy.isNull()) {
@@ -850,6 +831,11 @@ Parser::DeclGroupPtrTy Parser::ParseUsingDeclaration(
       }
 
       return Actions.ConvertDeclToDeclGroup(UED);
+    }
+
+    if (TypenameKWLoc.isValid()) {
+      SkipUntil(tok::semi);
+      return nullptr;
     }
 
     Decl *UED = nullptr;
@@ -1234,14 +1220,16 @@ Decl *Parser::ParseConstevalBlockDeclaration(SourceLocation &DeclEnd) {
   SourceLocation ConstevalLoc = ConsumeToken();
 
   EnterExpressionEvaluationContext ConstantEvaluated(
-      Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+      Actions, Sema::ExpressionEvaluationContext::ImmediateFunctionContext);
 
   LambdaIntroducer FakeIntroducer;
   FakeIntroducer.Range.setBegin(ConstevalLoc);
   FakeIntroducer.Range.setEnd(ConstevalLoc);
 
+  TypeResult ReturnTy = ParsedType::make(Actions.Context.VoidTy);
   ExprResult Lambda = ParseLambdaExpressionAfterIntroducer(FakeIntroducer,
-                                                           ConstevalLoc);
+                                                           ConstevalLoc,
+                                                           ReturnTy);
   if (Lambda.isInvalid())
     return nullptr;
 
@@ -1253,21 +1241,7 @@ Decl *Parser::ParseConstevalBlockDeclaration(SourceLocation &DeclEnd) {
   if (Invocation.isInvalid())
     return nullptr;
 
-  ExprResult TrueLiteral = Actions.ActOnCXXBoolLiteral(ConstevalLoc,
-                                                       tok::kw_true);
-  assert(!TrueLiteral.isInvalid());
-
-  ExprResult AssertClause = Actions.ActOnBinOp(getCurScope(), ConstevalLoc,
-                                               tok::comma, Invocation.get(),
-                                               TrueLiteral.get());
-  assert(!AssertClause.isInvalid());
-
-  if (AssertClause.get()->containsErrors())
-    return nullptr;
-
-  return Actions.ActOnStaticAssertDeclaration(ConstevalLoc, AssertClause.get(),
-                                              nullptr,
-                                              AssertClause.get()->getEndLoc());
+  return Actions.ActOnConstevalBlockDeclaration(ConstevalLoc, Invocation.get());
 }
 
 /// ParseDecltypeSpecifier - Parse a C++11 decltype specifier.
@@ -1560,11 +1534,12 @@ bool Parser::MaybeParseTypeTransformTypeSpecifier(DeclSpec &DS) {
 ///         ::[opt] nested-name-specifier[opt] class-name
 TypeResult Parser::ParseBaseTypeSpecifier(SourceLocation &BaseLoc,
                                           SourceLocation &EndLocation) {
-  // Ignore attempts to use typename
-  if (Tok.is(tok::kw_typename)) {
+  // Disallow attempts to use typename except for splice-type-specifiers.
+  SourceLocation TypenameKWLoc;
+  if (TryConsumeToken(tok::kw_typename, TypenameKWLoc) &&
+      !Tok.is(tok::l_splice)) {
     Diag(Tok, diag::err_expected_class_name_not_template)
         << FixItHint::CreateRemoval(Tok.getLocation());
-    ConsumeToken();
   }
 
   // Parse optional nested-name-specifier
@@ -1621,7 +1596,8 @@ TypeResult Parser::ParseBaseTypeSpecifier(SourceLocation &BaseLoc,
   }
 
   if (Tok.is(tok::annot_splice))
-    return ParseCXXSpliceAsType(/*AllowDependent=*/true, /*Complain=*/true);
+    return ParseCXXSpliceAsType(TypenameKWLoc, /*AllowDependent=*/true,
+                                /*Complain=*/true);
 
   if (Tok.isNot(tok::identifier)) {
     Diag(Tok, diag::err_expected_class_name);
@@ -1929,6 +1905,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
 #include "clang/Basic/TransformTypeTraits.def"
           tok::kw___is_abstract,
           tok::kw___is_aggregate,
+          tok::kw___is_consteval_only,
           tok::kw___is_arithmetic,
           tok::kw___is_array,
           tok::kw___is_assignable,
@@ -1965,7 +1942,6 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
           tok::kw___is_pointer,
           tok::kw___is_polymorphic,
           tok::kw___is_reference,
-          tok::kw___is_referenceable,
           tok::kw___is_rvalue_expr,
           tok::kw___is_rvalue_reference,
           tok::kw___is_same,
@@ -2503,7 +2479,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
       // Parse the definition body.
       ParseStructUnionBody(StartLoc, TagType, cast<RecordDecl>(D));
       if (SkipBody.CheckSameAsPrevious &&
-          !Actions.ActOnDuplicateDefinition(TagOrTempResult.get(), SkipBody)) {
+          !Actions.ActOnDuplicateDefinition(getCurScope(),
+                                            TagOrTempResult.get(), SkipBody)) {
         DS.SetTypeSpecError();
         return;
       }
@@ -2643,6 +2620,9 @@ BaseResult Parser::ParseBaseSpecifier(Decl *ClassDecl) {
 
     IsVirtual = true;
   }
+
+  if (getLangOpts().HLSL && IsVirtual)
+    Diag(Tok.getLocation(), diag::err_hlsl_virtual_inheritance);
 
   CheckMisplacedCXX11Attribute(Attributes, StartLoc);
 
@@ -3134,7 +3114,7 @@ Parser::DeclGroupPtrTy Parser::ParseCXXClassMemberDeclaration(
   }
 
   if (!TemplateInfo.Kind &&
-      getLangOpts().ConstevalBlocks && Tok.is(tok::kw_consteval) &&
+      getLangOpts().Reflection && Tok.is(tok::kw_consteval) &&
       NextToken().is(tok::l_brace)) {
     SourceLocation DeclEnd;
     return DeclGroupPtrTy::make(
@@ -3690,12 +3670,19 @@ ExprResult Parser::ParseCXXMemberInitializer(Decl *D, bool IsFunction,
 
   bool IsFieldInitialization = isa_and_present<FieldDecl>(D);
 
-  EnterExpressionEvaluationContext Context(
-      Actions,
-      IsFieldInitialization
-          ? Sema::ExpressionEvaluationContext::PotentiallyEvaluatedIfUsed
-          : Sema::ExpressionEvaluationContext::PotentiallyEvaluated,
-      D);
+  auto Ctx = Sema::ExpressionEvaluationContext::PotentiallyEvaluated;
+  if (IsFieldInitialization)
+    Ctx = Sema::ExpressionEvaluationContext::PotentiallyEvaluatedIfUsed;
+  else if (auto *VD = dyn_cast_or_null<VarDecl>(D);
+           VD && getLangOpts().CPlusPlus23) {
+    if (VD->isConstexpr())
+      Ctx = Sema::ExpressionEvaluationContext::ImmediateFunctionContext;
+    else if (auto *CIA = VD->getAttr<ConstInitAttr>();
+             CIA && CIA->isConstinit())
+      Ctx = Sema::ExpressionEvaluationContext::ImmediateFunctionContext;
+  }
+
+  EnterExpressionEvaluationContext Context(Actions, Ctx, D);
 
   // CWG2760
   // Default member initializers used to initialize a base or member subobject
@@ -3889,7 +3876,7 @@ Parser::DeclGroupPtrTy Parser::ParseCXXClassMemberDeclarationWithPragmas(
     return ParseOpenMPDeclarativeDirectiveWithExtDecl(
         AS, AccessAttrs, /*Delayed=*/true, TagType, TagDecl);
   case tok::annot_pragma_openacc:
-    return ParseOpenACCDirectiveDecl();
+    return ParseOpenACCDirectiveDecl(AS, AccessAttrs, TagType, TagDecl);
 
   default:
     if (tok::isPragmaAnnotation(Tok.getKind())) {

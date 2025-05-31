@@ -8,9 +8,24 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: %clang_cc1 %s -std=c++23 -freflection -freflection-new-syntax
+// RUN: %clang_cc1 %s -std=c++26 -freflection -fentity-proxy-reflection -verify
 
 using info = decltype(^^int);
+
+namespace anon_union_member_splice {
+struct C {
+  union {
+    int i;
+  };
+};
+
+auto c = C{.i=2};
+auto v = c.[:^^C::i:];  // expected-error {{not derived from}}
+
+static union { int m; };
+constexpr auto r = ^^m;
+auto p = &[:r:];  // expected-error {{cannot form a pointer-to-member}}
+}  // namespace anon_union_member_slice
 
                                  // ===========
                                  // idempotency
@@ -62,13 +77,22 @@ static_assert(fn() == 33);
 
 namespace with_functions {
 consteval int vanilla_fn() { return 42; }
+consteval int with_default_arg(int a = 5) { return a; }
 
 constexpr info r_vanilla_fn = ^^vanilla_fn;
+constexpr info r_with_default_arg = ^^with_default_arg;
 static_assert([:r_vanilla_fn:]() == 42);
+static_assert([:r_with_default_arg:]() == 5);
+static_assert([:r_with_default_arg:](11) == 11);
 
 // With a dependent reflection.
 template <info R> consteval int fn() { return [:R:](); }
 static_assert(fn<r_vanilla_fn>() == 42);
+static_assert(fn<r_with_default_arg>() == 5);
+
+void runtime() {
+    (void) [:^^runtime:];
+}
 }  // namespace with_functions
 
                         // ============================
@@ -171,6 +195,33 @@ int dK = d.[:^^S::k:];
 
 }  // namespace with_member_access
 
+                             // ===================
+                             // with_entity_proxies
+                             // ===================
+
+namespace with_entity_proxies {
+namespace NS {
+namespace Inner {
+consteval int fn() { return 42; }
+template <auto V> consteval int tfn() { return V; }
+}  // namespace Inner
+
+using Inner::fn;
+using Inner::tfn;
+}  // namespace NS
+
+// splice-expressions
+static_assert([:^^NS::fn:]() == 42);
+static_assert(template [:^^NS::tfn:]<4>() == 4);
+
+// nested proxies
+struct A { int m; };
+struct B : A { using A::m; };
+struct C : B { using B::m; };
+
+static_assert(&[:^^C::m:] == &A::m);
+}  // namespace with_entity_proxies
+
                          // ===========================
                          // with_implicit_member_access
                          // ===========================
@@ -247,6 +298,21 @@ static_assert(int([:rB:]) == int([:rClsB:]));
 static_assert(static_cast<Enum>([:rClsB:]) == B);
 }  // namespace with_enums
 
+                            // ====================
+                            // address_of_bit_field
+                            // ====================
+
+namespace address_of_bit_field {
+struct S {
+  int x : 4, y : 4;
+};
+
+constexpr auto f() {
+  constexpr auto r = ^^S::y;
+  return &[:r:];  // expected-error {{address of bit-field requested}}
+}
+}  // namespace address_of_bit_field
+
                                 // =============
                                 // colon_parsing
                                 // =============
@@ -291,3 +357,33 @@ struct Cls
 void fn(int);
 static_assert(^^decltype(Cls<^^fn>::Impl(&fn)) == ^^Cls<^^fn>::Impl<void, int>);
 }  // namespace bb_clang_p2996_issue_22_regression_test
+
+                  // ========================================
+                  // bb_clang_p2996_issue_131_regression_test
+                  // ========================================
+
+namespace bb_clang_p2996_issue_131_regression_test {
+struct Y 
+{
+    int g(this Y const&, int, int);
+};
+static_assert(&Y::g == &[:^^Y::g:]);
+}  // namespace bb_clang_p2996_issue_131_regression_test
+
+                  // ========================================
+                  // bb_clang_p2996_issue_132_regression_test
+                  // ========================================
+
+namespace bb_clang_p2996_issue_132_regression_test {
+template<typename>
+void f()
+{
+   auto func = []<auto Mem>() static {
+      return [: ^^[:Mem:] ::func :];
+   };
+}
+
+void g() {
+   f<int>();
+}
+}  // namespace bb_clang_p2996_issue_132_regression_test

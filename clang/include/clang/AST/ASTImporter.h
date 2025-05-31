@@ -62,7 +62,8 @@ class TypeSourceInfo;
   class ASTImporter {
     friend class ASTNodeImporter;
   public:
-    using NonEquivalentDeclSet = llvm::DenseSet<std::pair<Decl *, Decl *>>;
+    using NonEquivalentDeclSet =
+        llvm::DenseSet<std::tuple<Decl *, Decl *, int>>;
     using ImportedCXXBaseSpecifierMap =
         llvm::DenseMap<const CXXBaseSpecifier *, CXXBaseSpecifier *>;
 
@@ -349,6 +350,17 @@ class TypeSourceInfo;
     llvm::Expected<Decl *> Import(Decl *FromD);
     llvm::Expected<const Decl *> Import(const Decl *FromD) {
       return Import(const_cast<Decl *>(FromD));
+    }
+
+    /// Import the given splice specifier from the "from" context into the "to"
+    /// context.
+    ///
+    /// \returns The equivalent splice specifier in the "to" context, or the
+    /// import error.
+    llvm::Expected<SpliceSpecifier *> Import(SpliceSpecifier *FromSS);
+    llvm::Expected<const SpliceSpecifier *>
+    Import(const SpliceSpecifier *FromD) {
+      return Import(const_cast<SpliceSpecifier *>(FromD));
     }
 
     llvm::Expected<InheritedConstructor>

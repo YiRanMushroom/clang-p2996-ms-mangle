@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: %clang_cc1 %s -std=c++23 -freflection -freflection-new-syntax
+// RUN: %clang_cc1 %s -std=c++23 -freflection
 
 using info = decltype(^^int);
 
@@ -108,6 +108,7 @@ static_assert(^^int != ^^unsigned int);
 static_assert(^^int != ^^Enum);
 static_assert(^^int != ^^EnumCls);
 static_assert(^^int_alias != ^^int);
+static_assert(^^int_alias const == ^^int const);
 static_assert(^^int_alias != ^^Test::type);
 static_assert(^^int_alias != ^^myns::Test::type);
 static_assert(^^Test::type != ^^myns::Test::type);
@@ -155,7 +156,10 @@ consteval info local_var_reflection() {
 }
 static_assert(local_var_reflection() == local_var_reflection());
 
-// Compare reflections of the same local variable in different stack frames.
+                   // ======================================
+                   // local_variables_different_stack_frames
+                   // ======================================
+
 namespace local_variables_different_stack_frames {
 consteval bool local_var_in_diff_frames_equal(info inf, int call_depth = 0) {
     int lcl = call_depth;
@@ -171,3 +175,16 @@ consteval bool local_var_in_diff_frames_equal(info inf, int call_depth = 0) {
 }
 
 }  // namespace local_variables_different_stack_frames
+
+                       // ==============================
+                       // defaulted_comparison_operators
+                       // ==============================
+
+namespace defaulted_comparison_operators {
+struct S {
+  info mem;
+  consteval bool operator==(const S &) const = default;
+};
+
+static_assert(S{} == S{});
+}  // namespace defaulted_comparison_operators

@@ -68,6 +68,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclOpenACC.h"
 #include "clang/AST/DeclOpenMP.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
@@ -78,6 +79,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtSYCL.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/TemplateName.h"
 #include "clang/AST/Type.h"
@@ -88,7 +90,6 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
@@ -160,6 +161,29 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   }
 
   llvm_unreachable("Unhandled kind of DeclarationName");
+  return true;
+}
+
+static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
+                                     SpliceSpecifier *Splice1,
+                                     SpliceSpecifier *Splice2) {
+  if (Splice1->isSpecialization() != Splice2->isSpecialization())
+    return false;
+
+  if (!IsStructurallyEquivalent(Context, Splice1->getOperand(),
+                                Splice2->getOperand()))
+      return false;
+
+  if (Splice1->isSpecialization()) {
+    auto TArgs1 = Splice1->getTemplateArgs()->arguments();
+    auto TArgs2 = Splice2->getTemplateArgs()->arguments();
+    if (TArgs1.size() != TArgs2.size())
+      return false;
+    for (unsigned k = 0; k < TArgs1.size(); ++k)
+      if (!IsStructurallyEquivalent(Context, TArgs1[k], TArgs2[k]))
+        return false;
+  }
+
   return true;
 }
 
@@ -577,7 +601,10 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                     NNS1->getAsRecordDecl(),
                                     NNS2->getAsRecordDecl());
   case NestedNameSpecifier::Splice:
-    llvm::report_fatal_error("unimplemented: IsStructurallyEquivalent");
+  case NestedNameSpecifier::SpliceWithTemplate:
+    return IsStructurallyEquivalent(
+        Context, const_cast<SpliceSpecifier *>(NNS1->getAsSplice()),
+        const_cast<SpliceSpecifier *>(NNS2->getAsSplice()));
   }
   return false;
 }
@@ -684,8 +711,11 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     return llvm::APSInt::isSameValue(Arg1.getAsIntegral(),
                                      Arg2.getAsIntegral());
 
-  case TemplateArgument::SpliceSpecifier:
-    return Arg1.getAsSpliceSpecifier() == Arg2.getAsSpliceSpecifier();
+  case TemplateArgument::Splice: {
+    return IsStructurallyEquivalent(Context, Arg1.getAsSpliceSpecifier(),
+                                    Arg2.getAsSpliceSpecifier()) &&
+           Arg1.getNumSpliceExpansions() == Arg2.getNumSpliceExpansions();
+  }
 
   case TemplateArgument::Declaration:
     return IsStructurallyEquivalent(Context, Arg1.getAsDecl(), Arg2.getAsDecl());
@@ -901,8 +931,12 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     if (!IsStructurallyEquivalent(Context, MemPtr1->getPointeeType(),
                                   MemPtr2->getPointeeType()))
       return false;
-    if (!IsStructurallyEquivalent(Context, QualType(MemPtr1->getClass(), 0),
-                                  QualType(MemPtr2->getClass(), 0)))
+    if (!IsStructurallyEquivalent(Context, MemPtr1->getQualifier(),
+                                  MemPtr2->getQualifier()))
+      return false;
+    if (!IsStructurallyEquivalent(Context,
+                                  MemPtr1->getMostRecentCXXRecordDecl(),
+                                  MemPtr2->getMostRecentCXXRecordDecl()))
       return false;
     break;
   }
@@ -1179,8 +1213,8 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
   case Type::ReflectionSplice:
     if (!IsStructurallyEquivalent(Context,
-                                  cast<ReflectionSpliceType>(T1)->getOperand(),
-                                  cast<ReflectionSpliceType>(T2)->getOperand()))
+                                  cast<ReflectionSpliceType>(T1)->getSplice(),
+                                  cast<ReflectionSpliceType>(T2)->getSplice()))
       return false;
     break;
 
@@ -2323,7 +2357,8 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
   // Check whether we already know that these two declarations are not
   // structurally equivalent.
-  if (Context.NonEquivalentDecls.count(P))
+  if (Context.NonEquivalentDecls.count(
+          std::make_tuple(D1, D2, Context.IgnoreTemplateParmDepth)))
     return false;
 
   // Check if a check for these declarations is already pending.
@@ -2531,7 +2566,8 @@ bool StructuralEquivalenceContext::Finish() {
     if (!Equivalent) {
       // Note that these two declarations are not equivalent (and we already
       // know about it).
-      NonEquivalentDecls.insert(P);
+      NonEquivalentDecls.insert(
+          std::make_tuple(D1, D2, IgnoreTemplateParmDepth));
 
       return true;
     }

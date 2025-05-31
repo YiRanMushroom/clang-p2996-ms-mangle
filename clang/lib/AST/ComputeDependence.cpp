@@ -392,9 +392,8 @@ ExprDependence clang::computeDependence(PackIndexingExpr *E) {
          ExprDependence::Instantiation;
 
   ArrayRef<Expr *> Exprs = E->getExpressions();
-  if (Exprs.empty())
+  if (Exprs.empty() || !E->isFullySubstituted())
     D |= PatternDep | ExprDependence::Instantiation;
-
   else if (!E->getIndexExpr()->isInstantiationDependent()) {
     std::optional<unsigned> Index = E->getSelectedIndex();
     assert(Index && *Index < Exprs.size() && "pack index out of bound");
@@ -948,8 +947,23 @@ ExprDependence clang::computeDependence(CXXReflectExpr *E,
   if (E->hasDependentSubExpr())
     return E->getDependentSubExpr()->getDependence();
 
-  APValue RV = E->getReflection();
   ExprDependence D = ExprDependence::None;
+
+  // Unwrap entity proxies.
+  APValue RV = E->getReflection();
+  if (RV.isReflectedEntityProxy()) {
+    NamedDecl *ND = RV.getReflectedEntityProxy()->getTargetDecl();
+
+    if (auto *T = dyn_cast<TypeDecl>(ND)) {
+      QualType QT = Ctx.getTypeDeclType(T);
+      RV = APValue(ReflectionKind::Type, QT.getAsOpaquePtr());
+    } else if (auto *T = dyn_cast<TemplateDecl>(ND)) {
+      RV = APValue(ReflectionKind::Template, T);
+    } else {
+      RV = APValue(ReflectionKind::Declaration, ND);
+    }
+  }
+
   switch (RV.getReflectionKind()) {
   case ReflectionKind::Type: {
     QualType T = RV.getReflectedType();
@@ -990,6 +1004,8 @@ ExprDependence clang::computeDependence(CXXReflectExpr *E,
   case ReflectionKind::BaseSpecifier:
   case ReflectionKind::DataMemberSpec:
     return ExprDependence::None;
+  case ReflectionKind::EntityProxy:
+    llvm_unreachable("should already have been unwrapped");
   }
   llvm_unreachable("unknown reflection kind while computing dependence");
 }
@@ -1004,12 +1020,12 @@ ExprDependence clang::computeDependence(CXXMetafunctionExpr *E) {
 }
 
 
-ExprDependence clang::computeDependence(CXXSpliceSpecifierExpr *E) {
-  return E->getOperand()->getDependence();
-}
-
 ExprDependence clang::computeDependence(CXXSpliceExpr *E) {
-  auto D = E->getOperand()->getDependence();
+  auto D = toExprDependence(E->getSplice()->getDependence());
+
+  if (auto *M = E->getModel())
+    D |= M->getDependence();
+
   if (D & ExprDependence::Value)
     D |= ExprDependence::Type;
   return D;
@@ -1035,6 +1051,13 @@ ExprDependence clang::computeDependence(ExtractLValueExpr *E) {
   return ExprDependence::None;
 }
 
+ExprDependence clang::computeDependence(ExplDependentCallExpr *E) {
+  auto D = E->getDependence();
+  if (E->getTemplateDepth() > 0)
+    D |= ExprDependence::Value;
+  return D;
+}
+
 ExprDependence clang::computeDependence(CXXExpansionInitListExpr *E) {
   auto D = ExprDependence::None;
   for (auto *SubExpr : E->getSubExprs())
@@ -1043,18 +1066,21 @@ ExprDependence clang::computeDependence(CXXExpansionInitListExpr *E) {
 }
 
 ExprDependence clang::computeDependence(CXXExpansionInitListSelectExpr *E) {
-  auto D = E->getRange()->getDependence() | E->getIdx()->getDependence();
-  if (D & ExprDependence::Value)
-    D |= ExprDependence::Type;
-  return D;
+  return ExprDependence::Type | ExprDependence::Value;
 }
 
-ExprDependence clang::computeDependence(
-        CXXDestructurableExpansionSelectExpr *E) {
-  auto D = E->getRange()->getDependence() | E->getIdx()->getDependence();
-  if (D & ExprDependence::Value)
-    D |= ExprDependence::Type;
-  return D;
+ExprDependence
+clang::computeDependence(CXXIndeterminateExpansionSelectExpr *E) {
+  return ExprDependence::Type | ExprDependence::Value;
+}
+
+ExprDependence clang::computeDependence(CXXIterableExpansionSelectExpr *E) {
+  return ExprDependence::Type | ExprDependence::Value;
+}
+
+ExprDependence
+clang::computeDependence(CXXDestructurableExpansionSelectExpr *E) {
+  return ExprDependence::Type | ExprDependence::Value;
 }
 
 ExprDependence clang::computeDependence(ObjCArrayLiteral *E) {

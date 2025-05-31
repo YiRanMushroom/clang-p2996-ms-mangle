@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: %clang_cc1 %s -std=c++23 -freflection -freflection-new-syntax
+// RUN: %clang_cc1 %s -std=c++23 -freflection -verify
 
 using info = decltype(^^int);
 
@@ -75,10 +75,10 @@ static_assert(obj3.value == 3);
 constexpr [:^^TAlias:] obj4 = {4};
 static_assert(obj4.value == 4);
 
-static_assert([:^^TCls:]<int>::zero == 0);
-static_assert(is_same_v<[:^^TCls:]<int>::type, int>);
-static_assert([:^^TAlias:]<int>::zero == 0);
-static_assert(is_same_v<[:^^TAlias:]<int>::type, int>);
+static_assert(template [:^^TCls:]<int>::zero == 0);
+static_assert(is_same_v<typename [:^^TCls:]<int>::type, int>);
+static_assert(template [:^^TAlias:]<int>::zero == 0);
+static_assert(is_same_v<typename [:^^TAlias:]<int>::type, int>);
 
 static_assert(template [:^^TFn:]<char>('a') == 'a');
 static_assert(template [:^^TFn:]<>('b') == 'b');
@@ -106,7 +106,7 @@ template <info R> consteval auto DepTClsFn(int value) {
   return obj;
 }
 template <info R> consteval auto DepTClsStaticMember() {
-  typename [:R:]<int>::type result = [:R:]<int>::zero;
+  typename [:R:]<int>::type result = template [:R:]<int>::zero;
   return result;
 }
 template <info R> consteval auto DepTClsCTAD(int value) {
@@ -157,3 +157,69 @@ namespace less_than_operator_ambiguity {
 constexpr int x = 3;
 static_assert([:^^x:] < 5);  // make sure this parses.
 }  // namespace less_than_operator_ambiguity
+
+                           // =======================
+                           // silly_typename_template
+                           // =======================
+
+namespace silly_typename_template {
+template <info R>
+consteval auto tfn() {
+  return typename template [:R:]<int>::Ty{}.value;
+}
+
+template <typename T>
+struct TCls {
+  struct Ty {
+    int value = 14;
+  };
+};
+
+static_assert(tfn<^^TCls>() == 14);
+}  // namespace silly_typename_template
+
+                               // ==============
+                               // tomasz_example
+                               // ==============
+
+namespace tomasz_example {
+template<template<class> class X>
+struct S {
+  typename [:^^X:]<int, float> m;
+    // expected-error@-1 {{too many template arguments}}
+};
+
+template<class> struct V1 {};  // expected-note {{template is declared here}}
+template<class, class = int> struct V2 {};
+
+S<V1> s1;  // expected-note {{in instantiation of template class}}
+S<V2> s2;
+}  // namespace tomasz_example
+
+// =============
+// barry_example
+// =============
+
+namespace barry_example {
+template <int...> struct V {};
+
+template <template <int> class X>
+struct S {
+  X<0> x;
+  [: ^^X :]<1> y;
+};
+
+S<V> s;
+}  // namespace barry_example
+                                 // ===========
+                                 // error_cases
+                                 // ===========
+
+namespace error_cases {
+template [:^^Nonexistent:]<3>::type u;
+  // expected-error@-1 {{use of undeclared identifier 'Nonexistent'}} \
+  // expected-error@-1 {{expected unqualified-id}}
+
+template [:^^non_dependent::TCls:] t = {1};
+  // expected-error@-1 {{expected unqualified-id}}
+}  // namespace error_cases

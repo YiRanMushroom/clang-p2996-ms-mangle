@@ -47,7 +47,7 @@ enum CPUFeatures {
   FEAT_RCPC,
   FEAT_RCPC2,
   FEAT_FRINTTS,
-  FEAT_DGH,
+  RESERVED_FEAT_DGH, // previously used and now ABI legacy
   FEAT_I8MM,
   FEAT_BF16,
   RESERVED_FEAT_EBF16, // previously used and now ABI legacy
@@ -69,13 +69,13 @@ enum CPUFeatures {
   FEAT_MEMTAG2,
   RESERVED_FEAT_MEMTAG3, // previously used and now ABI legacy
   FEAT_SB,
-  FEAT_PREDRES,
-  RESERVED_FEAT_SSBS, // previously used and now ABI legacy
+  RESERVED_FEAT_PREDRES, // previously used and now ABI legacy
+  RESERVED_FEAT_SSBS,    // previously used and now ABI legacy
   FEAT_SSBS2,
   FEAT_BTI,
-  RESERVED_FEAT_LS64,   // previously used and now ABI legacy
-  RESERVED_FEAT_LS64_V, // previously used and now ABI legacy
-  FEAT_LS64_ACCDATA,
+  RESERVED_FEAT_LS64,         // previously used and now ABI legacy
+  RESERVED_FEAT_LS64_V,       // previously used and now ABI legacy
+  RESERVED_FEAT_LS64_ACCDATA, // previously used and now ABI legacy
   FEAT_WFXT,
   FEAT_SME_F64,
   FEAT_SME_I64,

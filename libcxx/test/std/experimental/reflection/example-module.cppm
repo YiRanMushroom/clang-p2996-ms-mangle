@@ -27,8 +27,8 @@ export constexpr auto rObj = std::meta::reflect_object(obj);
                             // Reflections of values
                             // =====================
 
-export constexpr auto rValue = std::meta::reflect_value(1);
-export constexpr auto rRefl = std::meta::reflect_value(rValue);
+export constexpr auto rValue = std::meta::reflect_constant(1);
+export constexpr auto rRefl = std::meta::reflect_constant(rValue);
 export constexpr auto Splice = [:rRefl:];
 
                           // ========================
@@ -63,8 +63,9 @@ export struct Base {
   static constexpr int K = 12;
 };
 export struct Child : private Empty, Base {};
-export constexpr auto rBase1 = bases_of(^^Child)[0];
-export constexpr auto rBase2 = bases_of(^^Child)[1];
+constexpr auto ctx = std::meta::access_context::unchecked();
+export constexpr auto rBase1 = bases_of(^^Child, ctx)[0];
+export constexpr auto rBase2 = bases_of(^^Child, ctx)[1];
 
                       // =================================
                       // Reflections of data members specs

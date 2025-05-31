@@ -2,10 +2,10 @@
 //
 // RUN: mkdir %t
 // RUN: %{cxx} %{compile_flags} -std=c++26 \
-// RUN:     -freflection -freflection-new-syntax -fparameter-reflection \
+// RUN:     -freflection -fparameter-reflection \
 // RUN:     --precompile example-module.cppm -o %t/example-module.pcm
 // RUN: %{cxx} %{compile_flags} %{link_flags} -std=c++26 \
-// RUN:     -freflection -freflection-new-syntax -fparameter-reflection \
+// RUN:     -freflection -fparameter-reflection \
 // RUN:     -fmodule-file=Example=%t/example-module.pcm %t/example-module.pcm \
 // RUN:     module-imports.sh.cpp -o %t/module-imports.sh.cpp.tsk
 // RUN: %t/module-imports.sh.cpp.tsk > %t/stdout.txt
@@ -43,7 +43,7 @@ static_assert(type_of(Example::rObj) == ^^int);
                             // =====================
 
 static_assert(is_value(Example::rValue));
-static_assert(Example::rValue == std::meta::reflect_value(1));
+static_assert(Example::rValue == std::meta::reflect_constant(1));
 static_assert(Example::rValue == [:Example::rRefl:]);
 static_assert(Example::Splice == Example::rValue);
 
@@ -81,7 +81,9 @@ static_assert(is_data_member_spec(Example::rTDMS));
 static_assert(type_of(Example::rTDMS) == ^^int);
 
 struct S;
-static_assert(is_type(define_aggregate(^^S, {Example::rTDMS})));
+consteval {
+  define_aggregate(^^S, {Example::rTDMS});
+}
 
                                // ==============
                                // Driver program

@@ -19,13 +19,14 @@
 #include "clang/Basic/AttributeCommonInfo.h"
 #include "clang/Basic/Attributes.h"
 #include "clang/Basic/CharInfo.h"
+#include "clang/Basic/DiagnosticParse.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TokenKinds.h"
-#include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/RAIIObjectsForParser.h"
 #include "clang/Sema/EnterExpressionEvaluationContext.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/ParsedAttr.h"
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/SemaCUDA.h"
@@ -2054,6 +2055,10 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(DeclaratorContext Context,
   Decl *SingleDecl = nullptr;
   switch (Tok.getKind()) {
   case tok::kw_template:
+    if (NextToken().is(tok::l_splice))
+      return ParseSimpleDeclaration(Context, DeclEnd, DeclAttrs, DeclSpecAttrs,
+                                    true, nullptr, DeclSpecStart);
+    [[fallthrough]];
   case tok::kw_export:
     ProhibitAttributes(DeclAttrs);
     ProhibitAttributes(DeclSpecAttrs);
@@ -2078,10 +2083,9 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(DeclaratorContext Context,
     ProhibitAttributes(DeclSpecAttrs);
     return ParseNamespace(Context, DeclEnd);
   case tok::kw_using: {
-    ParsedAttributes Attrs(AttrFactory);
-    takeAndConcatenateAttrs(DeclAttrs, DeclSpecAttrs, Attrs);
+    takeAndConcatenateAttrs(DeclAttrs, std::move(DeclSpecAttrs));
     return ParseUsingDirectiveOrDeclaration(Context, ParsedTemplateInfo(),
-                                            DeclEnd, Attrs);
+                                            DeclEnd, DeclAttrs);
   }
   case tok::kw_static_assert:
   case tok::kw__Static_assert:
@@ -2090,7 +2094,7 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(DeclaratorContext Context,
     SingleDecl = ParseStaticAssertDeclaration(DeclEnd);
     break;
   case tok::kw_consteval:
-    if (getLangOpts().ConstevalBlocks && NextToken().is(tok::l_brace)) {
+    if (getLangOpts().Reflection && NextToken().is(tok::l_brace)) {
       ProhibitAttributes(DeclAttrs);
       ProhibitAttributes(DeclSpecAttrs);
       SingleDecl = ParseConstevalBlockDeclaration(DeclEnd);
@@ -2512,8 +2516,15 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
     bool IsForRangeLoop = false;
     if (TryConsumeToken(tok::colon, FRI->ColonLoc)) {
       IsForRangeLoop = true;
+
+      // Use an immediate function context if this is the initializer for a
+      // constexpr variable in an expansion statement.
+      auto Ctx = Sema::ExpressionEvaluationContext::PotentiallyEvaluated;
+      if (FRI->ExpansionStmt && DS.hasConstexprSpecifier())
+        Ctx = Sema::ExpressionEvaluationContext::ImmediateFunctionContext;
+
       EnterExpressionEvaluationContext ForRangeInitContext(
-          Actions, Sema::ExpressionEvaluationContext::PotentiallyEvaluated,
+          Actions, Ctx,
           /*LambdaContextDecl=*/nullptr,
           Sema::ExpressionEvaluationContextRecord::EK_Other,
           getLangOpts().CPlusPlus23);
@@ -2527,11 +2538,22 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
 
       if (getLangOpts().OpenMP)
         Actions.OpenMP().startOpenMPCXXRangeFor();
-      if (Tok.is(tok::l_brace))
-        FRI->RangeExpr = FRI->ExpansionStmt ? ParseExpansionInitList() :
-                                              ParseBraceInitializer();
-      else
-        FRI->RangeExpr = ParseExpression();
+
+      {
+        DeclContext *DC = Actions.CurContext;
+        while (isa<ExpansionStmtDecl>(DC))
+          DC = DC->getParent();
+        Sema::ContextRAII CtxGuard(Actions, DC, /*NewThis=*/false);
+
+        if (Tok.is(tok::l_brace))
+          FRI->RangeExpr = FRI->ExpansionStmt ? ParseExpansionInitList() :
+                                                ParseBraceInitializer();
+        else
+          FRI->RangeExpr = ParseExpression();
+
+        if (FRI->ExpansionStmt)
+          FRI->RangeExpr = Actions.MaybeCreateExprWithCleanups(FRI->RangeExpr);
+      }
 
       // Before c++23, ForRangeLifetimeExtendTemps should be empty.
       assert(
@@ -3741,8 +3763,14 @@ void Parser::ParseDeclarationSpecifiers(
           if (PA.isTypeAttr() && PA.getKind() != ParsedAttr::AT_LifetimeBound &&
               PA.getKind() != ParsedAttr::AT_AnyX86NoCfCheck)
             continue;
-          Diag(PA.getLoc(), diag::err_attribute_not_type_attr)
-              << PA << PA.isRegularKeywordAttribute();
+
+          if (PA.getKind() == ParsedAttr::AT_LifetimeBound)
+            Diag(PA.getLoc(), diag::err_attribute_wrong_decl_type)
+                << PA << PA.isRegularKeywordAttribute()
+                << ExpectedParameterOrImplicitObjectParameter;
+          else
+            Diag(PA.getLoc(), diag::err_attribute_not_type_attr)
+                << PA << PA.isRegularKeywordAttribute();
           PA.setInvalid();
         }
 
@@ -3754,27 +3782,41 @@ void Parser::ParseDeclarationSpecifiers(
       DS.Finish(Actions, Policy);
       return;
 
-    case tok::l_splice:
-      if (TryAnnotateTypeOrScopeToken(AllowImplicitTypename)) {
+    case tok::kw_template:
+      if (!NextToken().is(tok::l_splice)) {
+        goto DoneWithDeclSpec;
+      } else if (TryAnnotateTypeOrScopeToken()) {
+        DS.SetTypeSpecError();
+        goto DoneWithDeclSpec;
+      }
+
+      if (!NextToken().is(tok::kw_template))
+        continue;
+      break;
+    case tok::l_splice: {
+      bool MaybeSpecialized =
+          AllowImplicitTypename == ImplicitTypenameContext::Yes;
+      if (ParseSpliceSpecifier(MaybeSpecialized) ||
+          TryAnnotateTypeOrScopeToken()) {
+        DS.SetTypeSpecError();
+        goto DoneWithDeclSpec;
+      }
+
+      if (!Tok.is(tok::l_splice))
+        continue;
+      break;
+    }
+
+    case tok::annot_splice: {
+      SpliceResult SR = getSpliceAnnotation(Tok);
+      if (SR.isInvalid()) {
         DS.SetTypeSpecError();
         break;
       }
-      continue;
-
-    case tok::annot_splice: {
-      if (NextToken().is(tok::less)) {
-        // TODO(P2996): Handle 'template' keyword.
-        if (ParseTemplateAnnotationFromSplice(SourceLocation(), true, false)) {
-          DS.SetTypeSpecError();
-          break;
-        }
-        continue;
-      }
-      ExprResult Result = getExprAnnotation(Tok);
-      assert(!Result.isInvalid());
+      SpliceSpecifier *Splice = SR.get();
 
       if (DS.SetTypeSpecType(DeclSpec::TST_type_splice, Tok.getLocation(),
-                             PrevSpec, DiagID, Result.get(), Policy)) {
+                             PrevSpec, DiagID, Splice, Policy)) {
         Diag(Tok.getLocation(), DiagID) << PrevSpec;
         DS.SetTypeSpecError();
         break;
@@ -4467,6 +4509,10 @@ void Parser::ParseDeclarationSpecifiers(
           !getActions().getOpenCLOptions().isAvailableOption(
               "__cl_clang_function_pointers", getLangOpts())) {
         DiagID = diag::err_openclcxx_virtual_function;
+        PrevSpec = Tok.getIdentifierInfo()->getNameStart();
+        isInvalid = true;
+      } else if (getLangOpts().HLSL) {
+        DiagID = diag::err_hlsl_virtual_function;
         PrevSpec = Tok.getIdentifierInfo()->getNameStart();
         isInvalid = true;
       } else {
@@ -5228,7 +5274,9 @@ void Parser::ParseStructUnionBody(SourceLocation RecordLoc,
     }
 
     if (Tok.is(tok::annot_pragma_openacc)) {
-      ParseOpenACCDirectiveDecl();
+      AccessSpecifier AS = AS_none;
+      ParsedAttributes Attrs(AttrFactory);
+      ParseOpenACCDirectiveDecl(AS, Attrs, TagType, TagDecl);
       continue;
     }
 
@@ -5710,7 +5758,7 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
     Decl *D = SkipBody.CheckSameAsPrevious ? SkipBody.New : TagDecl;
     ParseEnumBody(StartLoc, D);
     if (SkipBody.CheckSameAsPrevious &&
-        !Actions.ActOnDuplicateDefinition(TagDecl, SkipBody)) {
+        !Actions.ActOnDuplicateDefinition(getCurScope(), TagDecl, SkipBody)) {
       DS.SetTypeSpecError();
       return;
     }
@@ -6082,7 +6130,7 @@ Parser::DeclGroupPtrTy Parser::ParseTopLevelStmtDecl() {
   TopLevelStmtDecl *TLSD = Actions.ActOnStartTopLevelStmtDecl(getCurScope());
   StmtResult R = ParseStatementOrDeclaration(Stmts, SubStmtCtx);
   if (!R.isUsable())
-    return nullptr;
+    R = Actions.ActOnNullStmt(Tok.getLocation());
 
   Actions.ActOnFinishTopLevelStmtDecl(TLSD, R.get());
 
@@ -7378,15 +7426,16 @@ void Parser::ParseDecompositionDeclarator(Declarator &D) {
 
   // If this doesn't look like a structured binding, maybe it's a misplaced
   // array declarator.
-  if (!(Tok.is(tok::identifier) &&
+  if (!(Tok.isOneOf(tok::identifier, tok::ellipsis) &&
         NextToken().isOneOf(tok::comma, tok::r_square, tok::kw_alignas,
-                            tok::l_square)) &&
+                            tok::identifier, tok::l_square, tok::ellipsis)) &&
       !(Tok.is(tok::r_square) &&
         NextToken().isOneOf(tok::equal, tok::l_brace))) {
     PA.Revert();
     return ParseMisplacedBracketDeclarator(D);
   }
 
+  SourceLocation PrevEllipsisLoc;
   SmallVector<DecompositionDeclarator::Binding, 32> Bindings;
   while (Tok.isNot(tok::r_square)) {
     if (!Bindings.empty()) {
@@ -7401,17 +7450,32 @@ void Parser::ParseDecompositionDeclarator(Declarator &D) {
           Diag(Tok, diag::err_expected_comma_or_rsquare);
         }
 
-        SkipUntil(tok::r_square, tok::comma, tok::identifier,
+        SkipUntil({tok::r_square, tok::comma, tok::identifier, tok::ellipsis},
                   StopAtSemi | StopBeforeMatch);
         if (Tok.is(tok::comma))
           ConsumeToken();
-        else if (Tok.isNot(tok::identifier))
+        else if (Tok.is(tok::r_square))
           break;
       }
     }
 
     if (isCXX11AttributeSpecifier())
       DiagnoseAndSkipCXX11Attributes();
+
+    SourceLocation EllipsisLoc;
+
+    if (Tok.is(tok::ellipsis)) {
+      Diag(Tok, getLangOpts().CPlusPlus26 ? diag::warn_cxx23_compat_binding_pack
+                                          : diag::ext_cxx_binding_pack);
+      if (PrevEllipsisLoc.isValid()) {
+        Diag(Tok, diag::err_binding_multiple_ellipses);
+        Diag(PrevEllipsisLoc, diag::note_previous_ellipsis);
+        break;
+      }
+      EllipsisLoc = Tok.getLocation();
+      PrevEllipsisLoc = EllipsisLoc;
+      ConsumeToken();
+    }
 
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_expected) << tok::identifier;
@@ -7422,6 +7486,13 @@ void Parser::ParseDecompositionDeclarator(Declarator &D) {
     SourceLocation Loc = Tok.getLocation();
     ConsumeToken();
 
+    if (Tok.is(tok::ellipsis) && !PrevEllipsisLoc.isValid()) {
+      DiagnoseMisplacedEllipsis(Tok.getLocation(), Loc, EllipsisLoc.isValid(),
+                                true);
+      EllipsisLoc = Tok.getLocation();
+      ConsumeToken();
+    }
+
     ParsedAttributes Attrs(AttrFactory);
     if (isCXX11AttributeSpecifier()) {
       Diag(Tok, getLangOpts().CPlusPlus26
@@ -7430,7 +7501,7 @@ void Parser::ParseDecompositionDeclarator(Declarator &D) {
       MaybeParseCXX11Attributes(Attrs);
     }
 
-    Bindings.push_back({II, Loc, std::move(Attrs)});
+    Bindings.push_back({II, Loc, std::move(Attrs), EllipsisLoc});
   }
 
   if (Tok.isNot(tok::r_square))
@@ -8189,6 +8260,14 @@ void Parser::ParseParameterDeclarationClause(
     }
 
     if (TryConsumeToken(tok::ellipsis, EllipsisLoc)) {
+      if (getLangOpts().CPlusPlus26) {
+        // C++26 [dcl.dcl.fct]p3:
+        //   A parameter-declaration-clause of the form
+        //   parameter-list '...' is deprecated.
+        Diag(EllipsisLoc, diag::warn_deprecated_missing_comma_before_ellipsis)
+            << FixItHint::CreateInsertion(EllipsisLoc, ", ");
+      }
+
       if (!getLangOpts().CPlusPlus) {
         // We have ellipsis without a preceding ',', which is ill-formed
         // in C. Complain and provide the fix.

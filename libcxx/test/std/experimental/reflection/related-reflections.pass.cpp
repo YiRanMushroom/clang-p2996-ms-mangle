@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 
 // <experimental/reflection>
 //
@@ -18,6 +17,8 @@
 
 #include <experimental/meta>
 
+
+constexpr auto ctx = std::meta::access_context::current();
 
                                 // ============
                                 // find_type_of
@@ -71,7 +72,8 @@ static_assert(template_of(^^DependentAlias<bool>) == ^^DependentAlias);
                                // ==============
 
 namespace find_parent_of {
-struct Cls {
+struct Base {};
+struct Cls : Base {
   struct InnerCls {};
   int mem;
   void memfn();
@@ -89,6 +91,8 @@ int var;
 void fn();
 namespace NestedNS { int var; };
 
+enum Enum { A };
+
 template <typename> constexpr int TVar = 0;
 template <typename> void TFn();
 template <typename> struct TCls { int var; };
@@ -102,6 +106,7 @@ static_assert(parent_of(^^Cls::mem) == ^^Cls);
 static_assert(parent_of(^^Cls::memfn) == ^^Cls);
 static_assert(parent_of(^^Cls::sfn) == ^^Cls);
 static_assert(parent_of(^^Cls::Alias) == ^^Cls);
+static_assert(parent_of(bases_of(^^Cls, ctx)[0]) == ^^Cls);
 
 static_assert(parent_of(^^Cls::TSMem) == ^^Cls);
 static_assert(parent_of(^^Cls::TSMem<int>) == ^^Cls);
@@ -120,6 +125,7 @@ static_assert(parent_of(^^var) == ^^find_parent_of);
 static_assert(parent_of(^^fn) == ^^find_parent_of);
 static_assert(parent_of(^^NestedNS) == ^^find_parent_of);
 static_assert(parent_of(^^NestedNS::var) == ^^NestedNS);
+static_assert(parent_of(^^A) == ^^Enum);
 
 static_assert(parent_of(^^TVar) == ^^find_parent_of);
 static_assert(parent_of(^^TVar<int>) == ^^find_parent_of);
@@ -157,5 +163,25 @@ static_assert(dealias(^^NSAliasAlias) == ^^dealiasing);
 static_assert(dealias(std::meta::info{}) == std::meta::info{});
 }  // namespace dealiasing
 
+                              // ================
+                              // anonymous_unions
+                              // ================
+
+namespace anonymous_unions {
+struct S {
+  union {
+    union {
+      int m;
+    };
+  };
+};
+
+static constexpr auto rm = ^^S::m;
+static_assert(type_of(rm) == ^^int);
+static_assert(is_union_type(parent_of(rm)));
+static_assert(is_union_type(parent_of(parent_of(rm))));
+static_assert(parent_of(rm) != parent_of(parent_of(rm)));
+static_assert(parent_of(parent_of(parent_of(rm))) == ^^S);
+}  // namespace anonymous_unions
 
 int main() { }

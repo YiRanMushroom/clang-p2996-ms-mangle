@@ -249,7 +249,11 @@ class ASTContext : public RefCountedBase<ASTContext> {
   mutable llvm::FoldingSet<ObjCObjectPointerType> ObjCObjectPointerTypes;
   mutable llvm::FoldingSet<DependentUnaryTransformType>
     DependentUnaryTransformTypes;
-  mutable llvm::ContextualFoldingSet<AutoType, ASTContext&> AutoTypes;
+  // An AutoType can have a dependency on another AutoType via its template
+  // arguments. Since both dependent and dependency are on the same set,
+  // we can end up in an infinite recursion when looking for a node if we used
+  // a `FoldingSet`, since both could end up in the same bucket.
+  mutable llvm::DenseMap<llvm::FoldingSetNodeID, AutoType *> AutoTypes;
   mutable llvm::FoldingSet<DeducedTemplateSpecializationType>
     DeducedTemplateSpecializationTypes;
   mutable llvm::FoldingSet<AtomicType> AtomicTypes;
@@ -287,8 +291,8 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// This is lazily created.  This is intentionally not serialized.
   mutable llvm::DenseMap<const RecordDecl*, const ASTRecordLayout*>
     ASTRecordLayouts;
-  mutable llvm::DenseMap<const ObjCContainerDecl*, const ASTRecordLayout*>
-    ObjCLayouts;
+  mutable llvm::DenseMap<const ObjCInterfaceDecl *, const ASTRecordLayout *>
+      ObjCLayouts;
 
   /// A cache from types to size and alignment information.
   using TypeInfoMap = llvm::DenseMap<const Type *, struct TypeInfo>;
@@ -347,6 +351,9 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// A mapping from classes created through 'define_aggregate' to the unique
   /// hashes of their member-specifications.
   mutable llvm::DenseMap<QualType, unsigned> ClsMemberSpecHashes;
+
+  /// A mapping from 'substitute' inputs to specializations.
+  mutable llvm::DenseMap<unsigned, APValue> SubstitutionHashes;
 
   /// MD5 hash of CUID. It is calculated when first used and cached by this
   /// data member.
@@ -421,14 +428,8 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// The identifier 'NSCopying'.
   IdentifierInfo *NSCopyingName = nullptr;
 
-  /// The identifier '__make_integer_seq'.
-  mutable IdentifierInfo *MakeIntegerSeqName = nullptr;
-
-  /// The identifier '__type_pack_element'.
-  mutable IdentifierInfo *TypePackElementName = nullptr;
-
-  /// The identifier '__builtin_common_type'.
-  mutable IdentifierInfo *BuiltinCommonTypeName = nullptr;
+#define BuiltinTemplate(BTName) mutable IdentifierInfo *Name##BTName = nullptr;
+#include "clang/Basic/BuiltinTemplates.inc"
 
   QualType ObjCConstantStringType;
   mutable RecordDecl *CFConstantStringTagDecl = nullptr;
@@ -510,6 +511,11 @@ class ASTContext : public RefCountedBase<ASTContext> {
   static constexpr unsigned ConstantArrayTypesLog2InitSize = 8;
   static constexpr unsigned GeneralTypesLog2InitSize = 9;
   static constexpr unsigned FunctionProtoTypesLog2InitSize = 12;
+
+  /// A mapping from an ObjC class to its subclasses.
+  llvm::DenseMap<const ObjCInterfaceDecl *,
+                 SmallVector<const ObjCInterfaceDecl *, 4>>
+      ObjCSubClasses;
 
   ASTContext &this_() { return *this; }
 
@@ -635,9 +641,10 @@ private:
 
   TranslationUnitDecl *TUDecl = nullptr;
   mutable ExternCContextDecl *ExternCContext = nullptr;
-  mutable BuiltinTemplateDecl *MakeIntegerSeqDecl = nullptr;
-  mutable BuiltinTemplateDecl *TypePackElementDecl = nullptr;
-  mutable BuiltinTemplateDecl *BuiltinCommonTypeDecl = nullptr;
+
+#define BuiltinTemplate(BTName)                                                \
+  mutable BuiltinTemplateDecl *Decl##BTName = nullptr;
+#include "clang/Basic/BuiltinTemplates.inc"
 
   /// The associated SourceManager object.
   SourceManager &SourceMgr;
@@ -734,7 +741,7 @@ public:
   // (However they are still accessible via TranslationUnitDecl->decls())
   //
   // Changing the scope clears the parent cache, which is expensive to rebuild.
-  std::vector<Decl *> getTraversalScope() const { return TraversalScope; }
+  ArrayRef<Decl *> getTraversalScope() const { return TraversalScope; }
   void setTraversalScope(const std::vector<Decl *> &);
 
   /// Forwards to get node parents from the ParentMapContext. New callers should
@@ -780,7 +787,7 @@ public:
   /// pool.
   DeclListNode *AllocateDeclListNode(clang::NamedDecl *ND) {
     if (DeclListNode *Alloc = ListNodeFreeList) {
-      ListNodeFreeList = Alloc->Rest.dyn_cast<DeclListNode*>();
+      ListNodeFreeList = dyn_cast_if_present<DeclListNode *>(Alloc->Rest);
       Alloc->D = ND;
       Alloc->Rest = nullptr;
       return Alloc;
@@ -1163,9 +1170,9 @@ public:
   }
 
   ExternCContextDecl *getExternCContextDecl() const;
-  BuiltinTemplateDecl *getMakeIntegerSeqDecl() const;
-  BuiltinTemplateDecl *getTypePackElementDecl() const;
-  BuiltinTemplateDecl *getBuiltinCommonTypeDecl() const;
+
+#define BuiltinTemplate(BTName) BuiltinTemplateDecl *get##BTName##Decl() const;
+#include "clang/Basic/BuiltinTemplates.inc"
 
   // Builtin Types.
   CanQualType VoidTy;
@@ -1570,10 +1577,9 @@ public:
   QualType getRValueReferenceType(QualType T) const;
 
   /// Return the uniqued reference to the type for a member pointer to
-  /// the specified type in the specified class.
-  ///
-  /// The class \p Cls is a \c Type because it could be a dependent name.
-  QualType getMemberPointerType(QualType T, const Type *Cls) const;
+  /// the specified type in the specified nested name.
+  QualType getMemberPointerType(QualType T, NestedNameSpecifier *Qualifier,
+                                const CXXRecordDecl *Cls) const;
 
   /// Return a non-unique reference to the type for a variable array of
   /// the specified element type.
@@ -1738,6 +1744,54 @@ public:
 
   QualType getEnumType(const EnumDecl *Decl) const;
 
+  /// Compute BestType and BestPromotionType for an enum based on the highest
+  /// number of negative and positive bits of its elements.
+  /// Returns true if enum width is too large.
+  bool computeBestEnumTypes(bool IsPacked, unsigned NumNegativeBits,
+                            unsigned NumPositiveBits, QualType &BestType,
+                            QualType &BestPromotionType);
+
+  /// Determine whether the given integral value is representable within
+  /// the given type T.
+  bool isRepresentableIntegerValue(llvm::APSInt &Value, QualType T);
+
+  /// Compute NumNegativeBits and NumPositiveBits for an enum based on
+  /// the constant values of its enumerators.
+  template <typename RangeT>
+  bool computeEnumBits(RangeT EnumConstants, unsigned &NumNegativeBits,
+                       unsigned &NumPositiveBits) {
+    NumNegativeBits = 0;
+    NumPositiveBits = 0;
+    bool MembersRepresentableByInt = true;
+    for (auto *Elem : EnumConstants) {
+      EnumConstantDecl *ECD = cast_or_null<EnumConstantDecl>(Elem);
+      if (!ECD)
+        continue; // Already issued a diagnostic.
+
+      llvm::APSInt InitVal = ECD->getInitVal();
+      if (InitVal.isUnsigned() || InitVal.isNonNegative()) {
+        // If the enumerator is zero that should still be counted as a positive
+        // bit since we need a bit to store the value zero.
+        unsigned ActiveBits = InitVal.getActiveBits();
+        NumPositiveBits = std::max({NumPositiveBits, ActiveBits, 1u});
+      } else {
+        NumNegativeBits =
+            std::max(NumNegativeBits, (unsigned)InitVal.getSignificantBits());
+      }
+
+      MembersRepresentableByInt &= isRepresentableIntegerValue(InitVal, IntTy);
+    }
+
+    // If we have an empty set of enumerators we still need one bit.
+    // From [dcl.enum]p8
+    // If the enumerator-list is empty, the values of the enumeration are as if
+    // the enumeration had a single enumerator with value 0
+    if (!NumPositiveBits && !NumNegativeBits)
+      NumPositiveBits = 1;
+
+    return MembersRepresentableByInt;
+  }
+
   QualType
   getUnresolvedUsingType(const UnresolvedUsingTypenameDecl *Decl) const;
 
@@ -1811,12 +1865,14 @@ public:
   QualType getDependentTemplateSpecializationType(
       ElaboratedTypeKeyword Keyword, NestedNameSpecifier *NNS,
       const IdentifierInfo *Name, ArrayRef<TemplateArgument> Args) const;
+
   QualType getDependentTemplateSpecializationType(
-      ElaboratedTypeKeyword Keyword, const CXXSpliceSpecifierExpr *Splice,
-      ArrayRef<TemplateArgumentLoc> Args) const;
+      ElaboratedTypeKeyword Keyword,
+      const SpliceSpecifier *Splice, ArrayRef<TemplateArgumentLoc> Args) const;
   QualType getDependentTemplateSpecializationType(
-      ElaboratedTypeKeyword Keyword, const CXXSpliceSpecifierExpr *Splice,
-      ArrayRef<TemplateArgument> Args) const;
+      ElaboratedTypeKeyword Keyword,
+      const SpliceSpecifier *Splice, ArrayRef<TemplateArgument> Args) const;
+
 
   TemplateArgument getInjectedTemplateArg(NamedDecl *ParamDecl) const;
 
@@ -1831,7 +1887,9 @@ public:
                                 std::optional<unsigned> NumExpansions,
                                 bool ExpectPackInType = true) const;
 
-  QualType getReflectionSpliceType(Expr *E, QualType UnderlyingType) const;
+  QualType getReflectionSpliceType(SourceLocation TypenameKWLoc,
+                                   SpliceSpecifier *Splice,
+                                   QualType UnderlyingType) const;
 
   QualType getObjCInterfaceType(const ObjCInterfaceDecl *Decl,
                                 ObjCInterfaceDecl *PrevDecl = nullptr) const;
@@ -2074,23 +2132,13 @@ public:
     return BoolName;
   }
 
-  IdentifierInfo *getMakeIntegerSeqName() const {
-    if (!MakeIntegerSeqName)
-      MakeIntegerSeqName = &Idents.get("__make_integer_seq");
-    return MakeIntegerSeqName;
+#define BuiltinTemplate(BTName)                                                \
+  IdentifierInfo *get##BTName##Name() const {                                  \
+    if (!Name##BTName)                                                         \
+      Name##BTName = &Idents.get(#BTName);                                     \
+    return Name##BTName;                                                       \
   }
-
-  IdentifierInfo *getTypePackElementName() const {
-    if (!TypePackElementName)
-      TypePackElementName = &Idents.get("__type_pack_element");
-    return TypePackElementName;
-  }
-
-  IdentifierInfo *getBuiltinCommonTypeName() const {
-    if (!BuiltinCommonTypeName)
-      BuiltinCommonTypeName = &Idents.get("__builtin_common_type");
-    return BuiltinCommonTypeName;
-  }
+#include "clang/Basic/BuiltinTemplates.inc"
 
   /// Retrieve the Objective-C "instancetype" type, if already known;
   /// otherwise, returns a NULL type;
@@ -2382,7 +2430,7 @@ public:
   TemplateName getDependentTemplateName(NestedNameSpecifier *NNS,
                                         OverloadedOperatorKind Operator) const;
   TemplateName
-  getDependentTemplateName(const CXXSpliceSpecifierExpr *S) const;
+  getDependentTemplateName(const SpliceSpecifier *S) const;
   TemplateName
   getSubstTemplateTemplateParm(TemplateName replacement, Decl *AssociatedDecl,
                                unsigned Index,
@@ -2645,13 +2693,6 @@ public:
   void DumpRecordLayout(const RecordDecl *RD, raw_ostream &OS,
                         bool Simple = false) const;
 
-  /// Get or compute information about the layout of the specified
-  /// Objective-C implementation.
-  ///
-  /// This may differ from the interface if synthesized ivars are present.
-  const ASTRecordLayout &
-  getASTObjCImplementationLayout(const ObjCImplementationDecl *D) const;
-
   /// Get our current best idea for the key function of the
   /// given record decl, or nullptr if there isn't one.
   ///
@@ -2690,7 +2731,6 @@ public:
 
   /// Get the offset of an ObjCIvarDecl in bits.
   uint64_t lookupFieldBitOffset(const ObjCInterfaceDecl *OID,
-                                const ObjCImplementationDecl *ID,
                                 const ObjCIvarDecl *Ivar) const;
 
   /// Find the 'this' offset for the member path in a pointer-to-member
@@ -3148,7 +3188,12 @@ public:
       bool &CanUseFirst, bool &CanUseSecond,
       SmallVectorImpl<FunctionProtoType::ExtParameterInfo> &NewParamInfos);
 
-  void ResetObjCLayout(const ObjCContainerDecl *CD);
+  void ResetObjCLayout(const ObjCInterfaceDecl *D);
+
+  void addObjCSubClass(const ObjCInterfaceDecl *D,
+                       const ObjCInterfaceDecl *SubClass) {
+    ObjCSubClasses[D].push_back(SubClass);
+  }
 
   //===--------------------------------------------------------------------===//
   //                    Integer Predicates
@@ -3358,6 +3403,9 @@ public:
   bool checkClassMemberSpecHash(QualType QT, unsigned &Out);
   void recordClassMemberSpecHash(QualType QT, unsigned Hash);
 
+  bool checkCachedSubstitution(unsigned Hash, APValue *Out);
+  void recordCachedSubstitution(unsigned Hash, const APValue &Value);
+
   /// Return a declaration for the global GUID object representing the given
   /// GUID value.
   MSGuidDecl *getMSGuidDecl(MSGuidDeclParts Parts) const;
@@ -3388,6 +3436,16 @@ public:
   /// conflicting SYCL kernel names and issue a diagnostic prior to calling
   /// this function.
   void registerSYCLEntryPointFunction(FunctionDecl *FD);
+
+  /// Given a type used as a SYCL kernel name, returns a reference to the
+  /// metadata generated from the corresponding SYCL kernel entry point.
+  /// Aborts if the provided type is not a registered SYCL kernel name.
+  const SYCLKernelInfo &getSYCLKernelInfo(QualType T) const;
+
+  /// Returns a pointer to the metadata generated from the corresponding
+  /// SYCLkernel entry point if the provided type corresponds to a registered
+  /// SYCL kernel name. Returns a null pointer otherwise.
+  const SYCLKernelInfo *findSYCLKernelInfo(QualType T) const;
 
   //===--------------------------------------------------------------------===//
   //                    Statistics
@@ -3535,9 +3593,7 @@ private:
   friend class DeclarationNameTable;
   friend class DeclContext;
 
-  const ASTRecordLayout &
-  getObjCLayout(const ObjCInterfaceDecl *D,
-                const ObjCImplementationDecl *Impl) const;
+  const ASTRecordLayout &getObjCLayout(const ObjCInterfaceDecl *D) const;
 
   /// A set of deallocations that should be performed when the
   /// ASTContext is destroyed.

@@ -245,6 +245,12 @@ public:
   // Emits a concept reference.
   void AddConceptReference(const ConceptReference *CR);
 
+  // Emits a splice specifier.
+  void AddSpliceSpecifier(const SpliceSpecifier *SS);
+  void writeSpliceSpecifierRef(const SpliceSpecifier *SS) {
+    AddSpliceSpecifier(SS);
+  }
+
   /// Emit a reference to a declaration.
   void AddDeclRef(const Decl *D) {
     return Writer->AddDeclRef(D, *Record);
@@ -321,6 +327,8 @@ public:
 
   /// Writes out a list of OpenACC clauses.
   void writeOpenACCClauseList(ArrayRef<const OpenACCClause *> Clauses);
+
+  void AddOpenACCRoutineDeclAttr(const OpenACCRoutineDeclAttr *A);
 
   /// Emit a string.
   void AddString(StringRef Str) {

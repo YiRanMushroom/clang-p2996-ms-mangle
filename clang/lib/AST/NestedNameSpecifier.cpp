@@ -28,8 +28,6 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -144,13 +142,15 @@ NestedNameSpecifier::SuperSpecifier(const ASTContext &Context,
 }
 
 NestedNameSpecifier *
-NestedNameSpecifier::SpliceSpecifier(
-    const ASTContext &Context, const CXXSpliceSpecifierExpr *Expr) {
-  assert(Expr && "Expr cannot be NULL");
+NestedNameSpecifier::SpliceScopeSpecifier(const ASTContext &Context,
+                                          bool Template,
+                                          const SpliceSpecifier *Splice) {
+  assert(Splice && "Splice cannot be NULL");
   NestedNameSpecifier Mockup;
   Mockup.Prefix.setPointer(nullptr);
-  Mockup.Prefix.setInt(StoredSpliceSpecifier);
-  Mockup.Specifier = const_cast<CXXSpliceSpecifierExpr *>(Expr);
+  Mockup.Prefix.setInt(Template ? StoredSpliceSpecifierWithTemplate :
+                                  StoredSpliceSpecifier);
+  Mockup.Specifier = const_cast<SpliceSpecifier *>(Splice);
 
   return FindOrInsert(Context, Mockup);
 }
@@ -178,6 +178,9 @@ NestedNameSpecifier::SpecifierKind NestedNameSpecifier::getKind() const {
 
   case StoredSpliceSpecifier:
     return Splice;
+
+  case StoredSpliceSpecifierWithTemplate:
+    return SpliceWithTemplate;
   }
   llvm_unreachable("Invalid NNS Kind!");
 }
@@ -203,6 +206,7 @@ CXXRecordDecl *NestedNameSpecifier::getAsRecordDecl() const {
   switch (Prefix.getInt()) {
   case StoredIdentifier:
   case StoredSpliceSpecifier:
+  case StoredSpliceSpecifierWithTemplate:
     return nullptr;
 
   case StoredDecl:
@@ -251,7 +255,9 @@ NestedNameSpecifierDependence NestedNameSpecifier::getDependence() const {
     return toNestedNameSpecifierDependendence(getAsType()->getDependence());
 
   case Splice:
-    return toNestedNameSpecifierDependence(getAsSpliceExpr()->getDependence());
+  case SpliceWithTemplate:
+    return toNestedNameSpecifierDependence(
+        getAsSplice()->getOperand()->getDependence());
   }
   llvm_unreachable("Invalid NNS Kind!");
 }
@@ -275,7 +281,8 @@ bool NestedNameSpecifier::containsErrors() const {
 /// Print this nested name specifier to the given output
 /// stream.
 void NestedNameSpecifier::print(raw_ostream &OS, const PrintingPolicy &Policy,
-                                bool ResolveTemplateArguments) const {
+                                bool ResolveTemplateArguments,
+                                bool PrintFinalScopeResOp) const {
   if (getPrefix())
     getPrefix()->print(OS, Policy);
 
@@ -296,7 +303,8 @@ void NestedNameSpecifier::print(raw_ostream &OS, const PrintingPolicy &Policy,
     break;
 
   case Global:
-    break;
+    OS << "::";
+    return;
 
   case Super:
     OS << "__super";
@@ -322,6 +330,7 @@ void NestedNameSpecifier::print(raw_ostream &OS, const PrintingPolicy &Policy,
 
     PrintingPolicy InnerPolicy(Policy);
     InnerPolicy.SuppressScope = true;
+    InnerPolicy.SuppressTagKeyword = true;
 
     // Nested-name-specifiers are intended to contain minimally-qualified
     // types. An actual ElaboratedType will not occur, since we'll store
@@ -361,13 +370,16 @@ void NestedNameSpecifier::print(raw_ostream &OS, const PrintingPolicy &Policy,
     break;
   }
 
-  case Splice: {
-    OS << "[: " << getAsSpliceExpr() << " :]";
+  case SpliceWithTemplate:
+    OS << "template ";
+    [[fallthrough]];
+  case Splice:
+    OS << "[: splice :]";
     break;
   }
-  }
 
-  OS << "::";
+  if (PrintFinalScopeResOp)
+    OS << "::";
 }
 
 LLVM_DUMP_METHOD void NestedNameSpecifier::dump(const LangOptions &LO) const {
@@ -406,6 +418,9 @@ NestedNameSpecifierLoc::getLocalDataLength(NestedNameSpecifier *Qualifier) {
     Length += sizeof(SourceLocation::UIntTy);
     break;
 
+  case NestedNameSpecifier::SpliceWithTemplate:
+    Length += sizeof(SourceLocation::UIntTy);
+    [[fallthrough]];
   case NestedNameSpecifier::TypeSpecWithTemplate:
   case NestedNameSpecifier::TypeSpec:
   case NestedNameSpecifier::Splice:
@@ -481,13 +496,18 @@ SourceRange NestedNameSpecifierLoc::getLocalSourceRange() const {
                        LoadSourceLocation(Data, Offset + sizeof(void*)));
   }
   case NestedNameSpecifier::Splice: {
-    // The "void*" that points at the Expr data.
-    const CXXSpliceSpecifierExpr *Splice =
-          reinterpret_cast<CXXSpliceSpecifierExpr *>(LoadPointer(Data,
-                                                                 Offset));
+    const SpliceSpecifier *Splice =
+        reinterpret_cast<SpliceSpecifier *>(LoadPointer(Data, Offset));
+    return SourceRange(Splice->getBeginLoc(),
+                       LoadSourceLocation(Data, Offset + sizeof(void*)));
+  }
+  case NestedNameSpecifier::SpliceWithTemplate: {
+    (void) LoadPointer(Data, Offset);
     return SourceRange(
-        Splice->getLSpliceLoc(),
-        LoadSourceLocation(Data, Offset + sizeof(void*)));
+        LoadSourceLocation(Data, Offset + sizeof(void*)),
+        LoadSourceLocation(
+            Data,
+            Offset + sizeof(void*) + sizeof(SourceLocation::UIntTy)));
   }
   }
 
@@ -505,12 +525,13 @@ TypeLoc NestedNameSpecifierLoc::getTypeLoc() const {
   return TypeLoc(Qualifier->getAsType(), TypeData);
 }
 
-const CXXSpliceSpecifierExpr *
-NestedNameSpecifierLoc::getSpliceExpr() const {
-  if (Qualifier->getKind() != NestedNameSpecifier::Splice)
+const SpliceSpecifier *
+NestedNameSpecifierLoc::getSplice() const {
+  if (Qualifier->getKind() != NestedNameSpecifier::Splice &&
+      Qualifier->getKind() != NestedNameSpecifier::SpliceWithTemplate)
     return nullptr;
 
-  return Qualifier->getAsSpliceExpr();
+  return Qualifier->getAsSplice();
 }
 
 static void Append(char *Start, char *End, char *&Buffer, unsigned &BufferSize,
@@ -680,14 +701,18 @@ void NestedNameSpecifierLocBuilder::MakeSuper(ASTContext &Context,
   SaveSourceLocation(ColonColonLoc, Buffer, BufferSize, BufferCapacity);
 }
 
-void NestedNameSpecifierLocBuilder::MakeSpliceSpecifier(
-    ASTContext &Context, const CXXSpliceSpecifierExpr *Expr,
-    SourceLocation ColonColonLoc) {
-  Representation = NestedNameSpecifier::SpliceSpecifier(Context, Expr);
+void NestedNameSpecifierLocBuilder::MakeSpliceScopeSpecifier(
+    ASTContext &Context, SourceLocation TemplateKWLoc,
+    const SpliceSpecifier *Splice, SourceLocation ColonColonLoc) {
+  bool Template = TemplateKWLoc.isValid();
+  Representation = NestedNameSpecifier::SpliceScopeSpecifier(Context, Template,
+                                                             Splice);
 
   // Push source-location info into the buffer.
-  SavePointer(const_cast<CXXSpliceSpecifierExpr *>(Expr), Buffer,
-              BufferSize, BufferCapacity);
+  SavePointer(const_cast<SpliceSpecifier *>(Splice), Buffer, BufferSize,
+              BufferCapacity);
+  if (Template)
+    SaveSourceLocation(TemplateKWLoc, Buffer, BufferSize, BufferCapacity);
   SaveSourceLocation(ColonColonLoc, Buffer, BufferSize, BufferCapacity);
 }
 
@@ -722,9 +747,16 @@ void NestedNameSpecifierLocBuilder::MakeTrivial(ASTContext &Context,
       }
 
       case NestedNameSpecifier::Splice: {
-        SavePointer(
-              const_cast<CXXSpliceSpecifierExpr *>(NNS->getAsSpliceExpr()),
-              Buffer, BufferSize, BufferCapacity);
+        SavePointer(const_cast<SpliceSpecifier *>(NNS->getAsSplice()),
+                    Buffer, BufferSize, BufferCapacity);
+        SaveSourceLocation(R.getBegin(), Buffer, BufferSize, BufferCapacity);
+        break;
+      }
+
+      case NestedNameSpecifier::SpliceWithTemplate: {
+        SavePointer(const_cast<SpliceSpecifier *>(NNS->getAsSplice()),
+                    Buffer, BufferSize, BufferCapacity);
+        SaveSourceLocation(R.getBegin(), Buffer, BufferSize, BufferCapacity);
         SaveSourceLocation(R.getBegin(), Buffer, BufferSize, BufferCapacity);
         break;
       }

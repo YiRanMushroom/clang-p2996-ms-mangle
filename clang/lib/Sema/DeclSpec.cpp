@@ -24,9 +24,6 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Sema.h"
-#include "clang/Sema/SemaDiagnostic.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallString.h"
 #include <cstring>
 using namespace clang;
 
@@ -125,12 +122,14 @@ void CXXScopeSpec::MakeSuper(ASTContext &Context, CXXRecordDecl *RD,
   "NestedNameSpecifierLoc range computation incorrect");
 }
 
-void CXXScopeSpec::MakeSpliceSpecifier(ASTContext &Context,
-                                       CXXSpliceSpecifierExpr * Expr,
-                                       SourceLocation ColonColonLoc) {
-  Builder.MakeSpliceSpecifier(Context, Expr, ColonColonLoc);
-
-  Range.setBegin(Expr->getLSpliceLoc());
+void CXXScopeSpec::MakeSpliceScopeSpecifier(ASTContext &Context,
+                                            SourceLocation TemplateKWLoc,
+                                            SpliceSpecifier *Splice,
+                                            SourceLocation ColonColonLoc) {
+  Builder.MakeSpliceScopeSpecifier(Context, TemplateKWLoc, Splice,
+                                   ColonColonLoc);
+  Range.setBegin(TemplateKWLoc.isValid() ? TemplateKWLoc :
+                 Splice->getBeginLoc());
   Range.setEnd(ColonColonLoc);
 
   assert(Range == Builder.getSourceRange() &&
@@ -401,11 +400,15 @@ bool Declarator::isDeclarationOfFunction() const {
       return false;
 
     case TST_decltype:
-    case TST_type_splice:
     case TST_typeof_unqualExpr:
     case TST_typeofExpr:
       if (Expr *E = DS.getRepAsExpr())
         return E->getType()->isFunctionType();
+      return false;
+
+    case TST_type_splice:
+      // TODO(P2996): This is wrong; a splice of a function type (or a
+      // non-dependent splice-specialization-specifier declares a function.
       return false;
 
 #define TRANSFORM_TYPE_TRAIT_DEF(_, Trait) case TST_##Trait:
@@ -838,6 +841,27 @@ bool DeclSpec::SetTypeSpecType(TST T, SourceLocation Loc,
 bool DeclSpec::SetTypeSpecType(TST T, SourceLocation Loc,
                                const char *&PrevSpec,
                                unsigned &DiagID,
+                               SpliceSpecifier *Rep,
+                               const PrintingPolicy &Policy) {
+  assert(isSpliceRep(T) && "T does not store a splice");
+  assert(Rep && "no splice provided!");
+  if (TypeSpecType == TST_error)
+    return false;
+  if (TypeSpecType != TST_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName((TST) TypeSpecType, Policy);
+    DiagID = diag::err_invalid_decl_spec_combination;
+    return true;
+  }
+  TypeSpecType = T;
+  SpliceRep = Rep;
+  TSTLoc = Loc;
+  TypeSpecOwned = false;
+  return false;
+}
+
+bool DeclSpec::SetTypeSpecType(TST T, SourceLocation Loc,
+                               const char *&PrevSpec,
+                               unsigned &DiagID,
                                Decl *Rep, bool Owned,
                                const PrintingPolicy &Policy) {
   return SetTypeSpecType(T, Loc, Loc, PrevSpec, DiagID, Rep, Owned, Policy);
@@ -1220,9 +1244,10 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
         !S.getLangOpts().ZVector)
       S.Diag(TSWRange.getBegin(), diag::err_invalid_vector_long_long_decl_spec);
 
-    // No vector __int128 prior to Power8.
+    // No vector __int128 prior to Power8 (or ZVector).
     if ((TypeSpecType == TST_int128) &&
-        !S.Context.getTargetInfo().hasFeature("power8-vector"))
+        !S.Context.getTargetInfo().hasFeature("power8-vector") &&
+        !S.getLangOpts().ZVector)
       S.Diag(TSTLoc, diag::err_invalid_vector_int128_decl_spec);
 
     // Complex vector types are not supported.
@@ -1244,9 +1269,10 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
           << (TypeAltiVecPixel ? "__pixel" :
                                  getSpecifierName((TST)TypeSpecType, Policy));
       }
-      // vector bool __int128 requires Power10.
+      // vector bool __int128 requires Power10 (or ZVector).
       if ((TypeSpecType == TST_int128) &&
-          (!S.Context.getTargetInfo().hasFeature("power10-vector")))
+          (!S.Context.getTargetInfo().hasFeature("power10-vector") &&
+           !S.getLangOpts().ZVector))
         S.Diag(TSTLoc, diag::err_invalid_vector_bool_int128_decl_spec);
 
       // Only 'short' and 'long long' are valid with vector bool. (PIM 2.1)
@@ -1362,8 +1388,7 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
                               S.getLocForEndOfToken(getTypeSpecComplexLoc()),
                                                  " double");
       TypeSpecType = TST_double;   // _Complex -> _Complex double.
-    } else if (TypeSpecType == TST_int || TypeSpecType == TST_char ||
-               TypeSpecType == TST_bitint) {
+    } else if (TypeSpecType == TST_int || TypeSpecType == TST_char) {
       // Note that this intentionally doesn't include _Complex _Bool.
       if (!S.getLangOpts().CPlusPlus)
         S.Diag(TSTLoc, diag::ext_integer_complex);

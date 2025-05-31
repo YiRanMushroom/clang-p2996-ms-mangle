@@ -45,10 +45,15 @@ def metafn_not_an_operator : Note<"%0 is not an operator or operator template">;
 // Parents.
 def metafn_parent_of_undeclared : Note<
   "cannot query the parent of %0 with no declaration">;
+def metafn_parent_of_extern_c : Note<
+  "cannot query the parent of %0 with C language linkage">;
 
 // Substitution and invocation.
 def metafn_cannot_be_arg : Note<
   "a reflection of %0 cannot represent a %select{function|template}1 argument">;
+def metafn_undeduced_placeholder : Note<
+  "cannot form a reflection of function %0 whose type %1 contains an undeduced "
+  "placeholder">;
 def metafn_cannot_invoke : Note<"cannot invoke %0">;
 def metafn_no_specialization_found : Note<
   "no specialization of the function template %0 matched the provided "
@@ -69,6 +74,13 @@ def metafn_function_is_not_member_of_object : Note<
 def metafn_function_returns_void : Note<
    "cannot invoke reflection of void-returning function">;
 
+// Layout.
+def metafn_offset_virtual_base_of_abstract : Note<
+  "cannot query the layout of a virtual base class of an abstract class">;
+
+// Accessibility.
+def metafn_access_query_class_being_defined : Note<
+  "cannot query the access of a member of class %0 currently being defined">;
 
 // Extraction.
 def metafn_cannot_extract : Note<
@@ -95,6 +107,9 @@ def metafn_name_invalid_identifier : Note<
 def metafn_already_complete_type : Note<"%0 is already a complete type">;
 def metafn_duplicate_member_names : Note<
   "cannot produce a class definition with multiple members named '%0'">;
+def metafn_injected_decl_non_plainly_consteval : Note<
+  "cannot produce an injected declaration from a non-plainly "
+  "constant-evaluated context">;
 
 // Annotation injection.
 def metafn_cannot_annotate : Note<"cannot attach an annotation to %1">;

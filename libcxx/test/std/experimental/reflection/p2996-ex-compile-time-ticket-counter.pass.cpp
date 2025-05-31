@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 
 // <experimental/reflection>
 //
@@ -24,26 +23,33 @@
 #include <print>
 
 
-class TU_Ticket {
-  template<int N> struct Helper;
-public:
-  static consteval int next() {
+template<int N> struct Helper;
+
+struct TU_Ticket {
+  static consteval int latest() {
     int k = 0;
-
-    // Search for the next incomplete 'Helper<k>'.
-    std::meta::info r;
-    while (is_complete_type(r = substitute(^^Helper,
-                                             { std::meta::reflect_value(k) })))
+    while (is_complete_type(substitute(^^Helper,
+                                       { std::meta::reflect_constant(k) })))
       ++k;
-
-    // Define 'Helper<k>' and return its index.
-    define_aggregate(r, {});
     return k;
+  }
+
+  static consteval void increment() {
+    define_aggregate(substitute(^^Helper,
+                                { std::meta::reflect_constant(latest())}),
+                     {});
   }
 };
 
+constexpr int x = TU_Ticket::latest();  // x initialized to 0.
+
+consteval { TU_Ticket::increment(); }
+constexpr int y = TU_Ticket::latest();  // y initialized to 1.
+
+consteval { TU_Ticket::increment(); }
+constexpr int z = TU_Ticket::latest();  // z initialized to 2.
+
 int main() {
   // RUN: grep "0, 1, 2" %t.stdout
-  std::println("{}, {}, {}",
-               TU_Ticket::next(), TU_Ticket::next(), TU_Ticket::next());
+  std::println("{}, {}, {}", x, y, z);
 }

@@ -34,7 +34,6 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 #include <cstddef>
@@ -165,7 +164,7 @@ QualType CXXTypeidExpr::getTypeOperand(const ASTContext &Context) const {
   assert(isTypeOperand() && "Cannot call getTypeOperand for typeid(expr)");
   Qualifiers Quals;
   return Context.getUnqualifiedArrayType(
-      Operand.get<TypeSourceInfo *>()->getType().getNonReferenceType(), Quals);
+      cast<TypeSourceInfo *>(Operand)->getType().getNonReferenceType(), Quals);
 }
 
 static bool isGLValueFromPointerDeref(const Expr *E) {
@@ -219,7 +218,7 @@ QualType CXXUuidofExpr::getTypeOperand(ASTContext &Context) const {
   assert(isTypeOperand() && "Cannot call getTypeOperand for __uuidof(expr)");
   Qualifiers Quals;
   return Context.getUnqualifiedArrayType(
-      Operand.get<TypeSourceInfo *>()->getType().getNonReferenceType(), Quals);
+      cast<TypeSourceInfo *>(Operand)->getType().getNonReferenceType(), Quals);
 }
 
 // CXXScalarValueInitExpr
@@ -1197,7 +1196,6 @@ CXXConstructExpr::CXXConstructExpr(
   CXXConstructExprBits.StdInitListInitialization = StdInitListInitialization;
   CXXConstructExprBits.ZeroInitialization = ZeroInitialization;
   CXXConstructExprBits.ConstructionKind = llvm::to_underlying(ConstructKind);
-  CXXConstructExprBits.IsImmediateEscalating = false;
   CXXConstructExprBits.Loc = Loc;
 
   Stmt **TrailingArgs = getTrailingArgs();
@@ -1720,18 +1718,18 @@ NonTypeTemplateParmDecl *SubstNonTypeTemplateParmExpr::getParameter() const {
 PackIndexingExpr *PackIndexingExpr::Create(
     ASTContext &Context, SourceLocation EllipsisLoc, SourceLocation RSquareLoc,
     Expr *PackIdExpr, Expr *IndexExpr, std::optional<int64_t> Index,
-    ArrayRef<Expr *> SubstitutedExprs, bool ExpandedToEmptyPack) {
+    ArrayRef<Expr *> SubstitutedExprs, bool FullySubstituted) {
   QualType Type;
-  if (Index && !SubstitutedExprs.empty())
+  if (Index && FullySubstituted && !SubstitutedExprs.empty())
     Type = SubstitutedExprs[*Index]->getType();
   else
-    Type = Context.DependentTy;
+    Type = PackIdExpr->getType();
 
   void *Storage =
       Context.Allocate(totalSizeToAlloc<Expr *>(SubstitutedExprs.size()));
   return new (Storage)
       PackIndexingExpr(Type, EllipsisLoc, RSquareLoc, PackIdExpr, IndexExpr,
-                       SubstitutedExprs, ExpandedToEmptyPack);
+                       SubstitutedExprs, FullySubstituted);
 }
 
 NamedDecl *PackIndexingExpr::getPackDecl() const {
@@ -1782,31 +1780,31 @@ TemplateArgument SubstNonTypeTemplateParmPackExpr::getArgumentPack() const {
   return TemplateArgument(llvm::ArrayRef(Arguments, NumArguments));
 }
 
-FunctionParmPackExpr::FunctionParmPackExpr(QualType T, VarDecl *ParamPack,
+FunctionParmPackExpr::FunctionParmPackExpr(QualType T, ValueDecl *ParamPack,
                                            SourceLocation NameLoc,
                                            unsigned NumParams,
-                                           VarDecl *const *Params)
+                                           ValueDecl *const *Params)
     : Expr(FunctionParmPackExprClass, T, VK_LValue, OK_Ordinary),
       ParamPack(ParamPack), NameLoc(NameLoc), NumParameters(NumParams) {
   if (Params)
     std::uninitialized_copy(Params, Params + NumParams,
-                            getTrailingObjects<VarDecl *>());
+                            getTrailingObjects<ValueDecl *>());
   setDependence(ExprDependence::TypeValueInstantiation |
                 ExprDependence::UnexpandedPack);
 }
 
 FunctionParmPackExpr *
 FunctionParmPackExpr::Create(const ASTContext &Context, QualType T,
-                             VarDecl *ParamPack, SourceLocation NameLoc,
-                             ArrayRef<VarDecl *> Params) {
-  return new (Context.Allocate(totalSizeToAlloc<VarDecl *>(Params.size())))
+                             ValueDecl *ParamPack, SourceLocation NameLoc,
+                             ArrayRef<ValueDecl *> Params) {
+  return new (Context.Allocate(totalSizeToAlloc<ValueDecl *>(Params.size())))
       FunctionParmPackExpr(T, ParamPack, NameLoc, Params.size(), Params.data());
 }
 
 FunctionParmPackExpr *
 FunctionParmPackExpr::CreateEmpty(const ASTContext &Context,
                                   unsigned NumParams) {
-  return new (Context.Allocate(totalSizeToAlloc<VarDecl *>(NumParams)))
+  return new (Context.Allocate(totalSizeToAlloc<ValueDecl *>(NumParams)))
       FunctionParmPackExpr(QualType(), nullptr, SourceLocation(), 0, nullptr);
 }
 
@@ -1832,11 +1830,11 @@ void MaterializeTemporaryExpr::setExtendingDecl(ValueDecl *ExtendedBy,
 
   // We may need to allocate extra storage for the mangling number and the
   // extended-by ValueDecl.
-  if (!State.is<LifetimeExtendedTemporaryDecl *>())
+  if (!isa<LifetimeExtendedTemporaryDecl *>(State))
     State = LifetimeExtendedTemporaryDecl::Create(
-        cast<Expr>(State.get<Stmt *>()), ExtendedBy, ManglingNumber);
+        cast<Expr>(cast<Stmt *>(State)), ExtendedBy, ManglingNumber);
 
-  auto ES = State.get<LifetimeExtendedTemporaryDecl *>();
+  auto ES = cast<LifetimeExtendedTemporaryDecl *>(State);
   ES->ExtendingDecl = ExtendedBy;
   ES->ManglingNumber = ManglingNumber;
 }
@@ -1857,23 +1855,42 @@ bool MaterializeTemporaryExpr::isUsableInConstantExpressions(
 
 TypeTraitExpr::TypeTraitExpr(QualType T, SourceLocation Loc, TypeTrait Kind,
                              ArrayRef<TypeSourceInfo *> Args,
-                             SourceLocation RParenLoc, bool Value)
+                             SourceLocation RParenLoc,
+                             std::variant<bool, APValue> Value)
     : Expr(TypeTraitExprClass, T, VK_PRValue, OK_Ordinary), Loc(Loc),
       RParenLoc(RParenLoc) {
   assert(Kind <= TT_Last && "invalid enum value!");
+
   TypeTraitExprBits.Kind = Kind;
   assert(static_cast<unsigned>(Kind) == TypeTraitExprBits.Kind &&
          "TypeTraitExprBits.Kind overflow!");
-  TypeTraitExprBits.Value = Value;
+
+  TypeTraitExprBits.IsBooleanTypeTrait = std::holds_alternative<bool>(Value);
+  if (TypeTraitExprBits.IsBooleanTypeTrait)
+    TypeTraitExprBits.Value = std::get<bool>(Value);
+  else
+    ::new (getTrailingObjects<APValue>())
+        APValue(std::get<APValue>(std::move(Value)));
+
   TypeTraitExprBits.NumArgs = Args.size();
   assert(Args.size() == TypeTraitExprBits.NumArgs &&
          "TypeTraitExprBits.NumArgs overflow!");
-
   auto **ToArgs = getTrailingObjects<TypeSourceInfo *>();
   for (unsigned I = 0, N = Args.size(); I != N; ++I)
     ToArgs[I] = Args[I];
 
   setDependence(computeDependence(this));
+
+  assert((TypeTraitExprBits.IsBooleanTypeTrait || isValueDependent() ||
+          getAPValue().isInt() || getAPValue().isAbsent()) &&
+         "Only int values are supported by clang");
+}
+
+TypeTraitExpr::TypeTraitExpr(EmptyShell Empty, bool IsStoredAsBool)
+    : Expr(TypeTraitExprClass, Empty) {
+  TypeTraitExprBits.IsBooleanTypeTrait = IsStoredAsBool;
+  if (!IsStoredAsBool)
+    ::new (getTrailingObjects<APValue>()) APValue();
 }
 
 TypeTraitExpr *TypeTraitExpr::Create(const ASTContext &C, QualType T,
@@ -1882,14 +1899,26 @@ TypeTraitExpr *TypeTraitExpr::Create(const ASTContext &C, QualType T,
                                      ArrayRef<TypeSourceInfo *> Args,
                                      SourceLocation RParenLoc,
                                      bool Value) {
-  void *Mem = C.Allocate(totalSizeToAlloc<TypeSourceInfo *>(Args.size()));
+  void *Mem =
+      C.Allocate(totalSizeToAlloc<APValue, TypeSourceInfo *>(0, Args.size()));
+  return new (Mem) TypeTraitExpr(T, Loc, Kind, Args, RParenLoc, Value);
+}
+
+TypeTraitExpr *TypeTraitExpr::Create(const ASTContext &C, QualType T,
+                                     SourceLocation Loc, TypeTrait Kind,
+                                     ArrayRef<TypeSourceInfo *> Args,
+                                     SourceLocation RParenLoc, APValue Value) {
+  void *Mem =
+      C.Allocate(totalSizeToAlloc<APValue, TypeSourceInfo *>(1, Args.size()));
   return new (Mem) TypeTraitExpr(T, Loc, Kind, Args, RParenLoc, Value);
 }
 
 TypeTraitExpr *TypeTraitExpr::CreateDeserialized(const ASTContext &C,
+                                                 bool IsStoredAsBool,
                                                  unsigned NumArgs) {
-  void *Mem = C.Allocate(totalSizeToAlloc<TypeSourceInfo *>(NumArgs));
-  return new (Mem) TypeTraitExpr(EmptyShell());
+  void *Mem = C.Allocate(totalSizeToAlloc<APValue, TypeSourceInfo *>(
+      IsStoredAsBool ? 0 : 1, NumArgs));
+  return new (Mem) TypeTraitExpr(EmptyShell(), IsStoredAsBool);
 }
 
 CXXReflectExpr::CXXReflectExpr(const ASTContext &C, QualType ExprTy, APValue RV)
@@ -1986,49 +2015,14 @@ CXXMetafunctionExpr *CXXMetafunctionExpr::CreateEmpty(ASTContext &C) {
   return new (C) CXXMetafunctionExpr(EmptyShell());
 }
 
-CXXSpliceSpecifierExpr::CXXSpliceSpecifierExpr(
-        QualType ResultTy, SourceLocation TemplateKWLoc,
-        SourceLocation LSpliceLoc, Expr *Operand, SourceLocation RSpliceLoc)
-  : Expr(CXXSpliceSpecifierExprClass, ResultTy, VK_PRValue, OK_Ordinary),
-    TemplateKWLoc(TemplateKWLoc), LSpliceLoc(LSpliceLoc), Operand(Operand),
-    RSpliceLoc(RSpliceLoc) {
-  setDependence(computeDependence(this));
-}
-
-CXXSpliceSpecifierExpr::CXXSpliceSpecifierExpr(EmptyShell Empty)
-  : Expr(CXXSpliceSpecifierExprClass, Empty) {
-}
-
-CXXSpliceSpecifierExpr *CXXSpliceSpecifierExpr::Create(
-        ASTContext &C, SourceLocation TemplateKWLoc, SourceLocation LSpliceLoc,
-        Expr *Operand, SourceLocation RSpliceLoc) {
-  return new (C) CXXSpliceSpecifierExpr(C.MetaInfoTy, TemplateKWLoc,
-                                        LSpliceLoc, Operand, RSpliceLoc);
-}
-
-CXXSpliceSpecifierExpr *CXXSpliceSpecifierExpr::CreateEmpty(ASTContext &C) {
-  return new (C) CXXSpliceSpecifierExpr(EmptyShell());
-}
-
 CXXSpliceExpr::CXXSpliceExpr(QualType ResultTy, ExprValueKind ValueKind,
                              SourceLocation TemplateKWLoc,
-                             SourceLocation LSpliceLoc, Expr *Operand,
-                             SourceLocation RSpliceLoc,
-                             const TemplateArgumentListInfo *TArgs,
+                             SpliceSpecifier *Splice, Expr *Model,
                              bool AllowMemberReference)
-  : Expr(CXXSpliceExprClass, ResultTy, ValueKind, OK_Ordinary),
-    LSpliceLoc(LSpliceLoc), Operand(Operand), RSpliceLoc(RSpliceLoc),
+  : Expr(CXXSpliceExprClass, ResultTy, ValueKind,
+         Model ? Model->getObjectKind() : OK_Ordinary),
+    TemplateKWLoc(TemplateKWLoc), Splice(Splice), Model(Model),
     AllowMemberReference(AllowMemberReference) {
-  SpliceExprBits.HasTemplateKWAndArgsInfo =
-      (TArgs != nullptr ) || TemplateKWLoc.isValid();
-
-  if (TArgs) {
-    getTrailingASTTemplateKWAndArgsInfo()->initializeFrom(
-          TemplateKWLoc, *TArgs, getTrailingTemplateArgumentLoc());
-  } else if (TemplateKWLoc.isValid()) {
-    getTrailingASTTemplateKWAndArgsInfo()->initializeFrom(TemplateKWLoc);
-  }
-
   setDependence(computeDependence(this));
 }
 
@@ -2036,26 +2030,16 @@ CXXSpliceExpr::CXXSpliceExpr(EmptyShell Empty)
   : Expr(CXXSpliceExprClass, Empty) {
 }
 
-CXXSpliceExpr *CXXSpliceExpr::Create(ASTContext &C,
-                                     ExprValueKind ValueKind,
+CXXSpliceExpr *CXXSpliceExpr::Create(ASTContext &C, ExprValueKind ValueKind,
                                      SourceLocation TemplateKWLoc,
-                                     SourceLocation LSpliceLoc,
-                                     Expr *Operand,
-                                     SourceLocation RSpliceLoc,
-                                     const TemplateArgumentListInfo *TArgs,
+                                     SpliceSpecifier *Splice, Expr *Model,
                                      bool AllowMemberReference) {
-  QualType ResultTy = Operand->getType();
-  if (Operand->isTypeDependent() || Operand->isValueDependent())
-    ResultTy = C.DependentTy;
+  QualType ResultTy =
+      (Splice->getDependence() == SpliceSpecifierDependence::None) ?
+      Model->getType() : C.DependentTy;
 
-  unsigned Size = totalSizeToAlloc<ASTTemplateKWAndArgsInfo,
-                                   TemplateArgumentLoc>(
-        (TemplateKWLoc.isValid() || TArgs) ? 1 : 0,
-        TArgs ? TArgs->size() : 0);
-  void *Mem = C.Allocate(Size, alignof(CXXSpliceExpr));
-  return new (Mem) CXXSpliceExpr(ResultTy, ValueKind, TemplateKWLoc,
-                                 LSpliceLoc, Operand, RSpliceLoc, TArgs,
-                                 AllowMemberReference);
+  return new (C) CXXSpliceExpr(ResultTy, ValueKind, TemplateKWLoc, Splice,
+                               Model, AllowMemberReference);
 }
 
 CXXSpliceExpr *CXXSpliceExpr::CreateEmpty(ASTContext &C) {
@@ -2085,6 +2069,20 @@ ExtractLValueExpr *ExtractLValueExpr::Create(ASTContext &C, SourceRange Range,
                                              QualType ResultTy,
                                              ValueDecl *Decl) {
   return new (C) ExtractLValueExpr(ResultTy, Range, Decl);
+}
+
+ExplDependentCallExpr::ExplDependentCallExpr(Expr *SubExpr,
+                                             unsigned TemplateDepth)
+    : Expr(ExplDependentCallExprClass, SubExpr->getType(),
+           SubExpr->getValueKind(), OK_Ordinary),
+      TemplateDepth(TemplateDepth), SubExpr(SubExpr) {
+  setDependence(computeDependence(this));
+}
+
+ExplDependentCallExpr *ExplDependentCallExpr::Create(ASTContext &C,
+                                                     Expr *SubExpr,
+                                                     unsigned TemplateDepth) {
+  return new (C) ExplDependentCallExpr(SubExpr, TemplateDepth);
 }
 
 CXXDependentMemberSpliceExpr::CXXDependentMemberSpliceExpr(
@@ -2136,6 +2134,67 @@ CXXExpansionInitListExpr *CXXExpansionInitListExpr::Create(
                                           LBraceLoc, RBraceLoc);
 }
 
+CXXIndeterminateExpansionSelectExpr::CXXIndeterminateExpansionSelectExpr(
+        QualType ResultTy, Expr *Range, Expr *Idx, VarDecl *ExpansionVar,
+        unsigned NumLifetimeExtendTemps,
+        MaterializeTemporaryExpr **LifetimeExtendTemps)
+    : Expr(CXXIndeterminateExpansionSelectExprClass, ResultTy, VK_PRValue,
+           OK_Ordinary),
+      SubExprs{Range, Idx}, ExpansionVar(ExpansionVar),
+      NumLifetimeExtendTemps(NumLifetimeExtendTemps),
+      LifetimeExtendTemps(LifetimeExtendTemps) {
+  setDependence(computeDependence(this));
+}
+
+CXXIndeterminateExpansionSelectExpr *
+CXXIndeterminateExpansionSelectExpr::Create(
+        const ASTContext &C, Expr *Range, Expr *Idx, VarDecl *ExpansionVar,
+        ArrayRef<MaterializeTemporaryExpr *> LifetimeExtendTemps) {
+  auto **temps = new (C) MaterializeTemporaryExpr *[LifetimeExtendTemps.size()];
+  std::copy(LifetimeExtendTemps.begin(), LifetimeExtendTemps.end(), temps);
+
+  return new (C) CXXIndeterminateExpansionSelectExpr(
+      C.DependentTy, Range, Idx, ExpansionVar, LifetimeExtendTemps.size(),
+      temps);
+}
+
+ArrayRef<MaterializeTemporaryExpr *>
+CXXIndeterminateExpansionSelectExpr::getLifetimeExtendTemps() const {
+  return ArrayRef<MaterializeTemporaryExpr *>(LifetimeExtendTemps,
+                                              NumLifetimeExtendTemps);
+}
+
+CXXIterableExpansionSelectExpr::CXXIterableExpansionSelectExpr(
+        QualType ResultTy, VarDecl *RangeVar, Expr *Impl)
+    : Expr(CXXIterableExpansionSelectExprClass, ResultTy, VK_PRValue,
+           OK_Ordinary),
+      ImplExpr(Impl), RangeVar(RangeVar) {
+  setDependence(computeDependence(this));
+}
+
+CXXIterableExpansionSelectExpr *
+CXXIterableExpansionSelectExpr::Create(const ASTContext &C, VarDecl *RangeVar,
+                                       Expr *Impl) {
+  return new (C) CXXIterableExpansionSelectExpr(C.DependentTy, RangeVar, Impl);
+}
+
+CXXDestructurableExpansionSelectExpr::CXXDestructurableExpansionSelectExpr(
+        QualType ResultTy, DecompositionDecl *DD, Expr *Idx,
+        VarDecl *ExpansionVar)
+    : Expr(CXXDestructurableExpansionSelectExprClass, ResultTy, VK_PRValue,
+           OK_Ordinary),
+      IdxExpr(Idx), DD(DD), ExpansionVar(ExpansionVar) {
+  setDependence(computeDependence(this));
+}
+
+CXXDestructurableExpansionSelectExpr *
+CXXDestructurableExpansionSelectExpr::Create(const ASTContext &C,
+                                             DecompositionDecl *DD, Expr *Idx,
+                                             VarDecl *ExpansionVar) {
+  return new (C) CXXDestructurableExpansionSelectExpr(C.DependentTy, DD, Idx,
+                                                      ExpansionVar);
+}
+
 CXXExpansionInitListSelectExpr::CXXExpansionInitListSelectExpr(
         QualType ResultTy, Expr *Range, Expr *Idx)
     : Expr(CXXExpansionInitListSelectExprClass, ResultTy, VK_PRValue,
@@ -2148,23 +2207,6 @@ CXXExpansionInitListSelectExpr *
 CXXExpansionInitListSelectExpr::Create(const ASTContext &C, Expr *Range,
                                        Expr *Idx) {
   return new (C) CXXExpansionInitListSelectExpr(C.DependentTy, Range, Idx);
-}
-
-CXXDestructurableExpansionSelectExpr::CXXDestructurableExpansionSelectExpr(
-        QualType ResultTy, Expr *Range, DecompositionDecl *DD, Expr *Idx,
-        bool IsConstexpr)
-    : Expr(CXXDestructurableExpansionSelectExprClass, ResultTy, VK_PRValue,
-           OK_Ordinary),
-      SubExprs{Range, Idx}, DD(DD), IsConstexpr(IsConstexpr) {
-  setDependence(computeDependence(this));
-}
-
-CXXDestructurableExpansionSelectExpr *
-CXXDestructurableExpansionSelectExpr::Create(const ASTContext &C, Expr *Range,
-                                             DecompositionDecl *DD, Expr *Idx,
-                                             bool IsConstexpr) {
-  return new (C) CXXDestructurableExpansionSelectExpr(C.DependentTy, Range, DD,
-                                                      Idx, IsConstexpr);
 }
 
 CUDAKernelCallExpr::CUDAKernelCallExpr(Expr *Fn, CallExpr *Config,

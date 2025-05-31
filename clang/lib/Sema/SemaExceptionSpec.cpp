@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/SemaInternal.h"
 #include "clang/AST/ASTMutationListener.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/Expr.h"
@@ -19,8 +18,8 @@
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Sema/SemaInternal.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallString.h"
 #include <optional>
 
 namespace clang {
@@ -717,9 +716,9 @@ bool Sema::handlerCanCatch(QualType HandlerType, QualType ExceptionType) {
     Qualifiers EQuals, HQuals;
     ExceptionType = Context.getUnqualifiedArrayType(
         ExceptionType->getPointeeType(), EQuals);
-    HandlerType = Context.getUnqualifiedArrayType(
-        HandlerType->getPointeeType(), HQuals);
-    if (!HQuals.compatiblyIncludes(EQuals))
+    HandlerType =
+        Context.getUnqualifiedArrayType(HandlerType->getPointeeType(), HQuals);
+    if (!HQuals.compatiblyIncludes(EQuals, getASTContext()))
       return false;
 
     if (HandlerType->isVoidType() && ExceptionType->isObjectType())
@@ -1069,7 +1068,7 @@ static CanThrowResult canVarDeclThrow(Sema &Self, const VarDecl *VD) {
 
   // If this is a decomposition declaration, bindings might throw.
   if (auto *DD = dyn_cast<DecompositionDecl>(VD))
-    for (auto *B : DD->bindings())
+    for (auto *B : DD->flat_bindings())
       if (auto *HD = B->getHoldingVar())
         CT = mergeCanThrow(CT, canVarDeclThrow(Self, HD));
 
@@ -1159,6 +1158,9 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
     return mergeCanThrow(CT, canSubStmtsThrow(*this, CE));
   }
 
+  case Expr::ExplDependentCallExprClass:
+    return canThrow(cast<ExplDependentCallExpr>(S)->getSubExpr());
+
   case Expr::CXXConstructExprClass:
   case Expr::CXXTemporaryObjectExprClass: {
     auto *CE = cast<CXXConstructExpr>(S);
@@ -1201,18 +1203,27 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
 
   case Expr::CXXDeleteExprClass: {
     auto *DE = cast<CXXDeleteExpr>(S);
-    CanThrowResult CT;
+    CanThrowResult CT = CT_Cannot;
     QualType DTy = DE->getDestroyedType();
     if (DTy.isNull() || DTy->isDependentType()) {
       CT = CT_Dependent;
     } else {
-      CT = canCalleeThrow(*this, DE, DE->getOperatorDelete());
-      if (const RecordType *RT = DTy->getAs<RecordType>()) {
-        const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-        const CXXDestructorDecl *DD = RD->getDestructor();
-        if (DD)
-          CT = mergeCanThrow(CT, canCalleeThrow(*this, DE, DD));
+      // C++20 [expr.delete]p6: If the value of the operand of the delete-
+      // expression is not a null pointer value and the selected deallocation
+      // function (see below) is not a destroying operator delete, the delete-
+      // expression will invoke the destructor (if any) for the object or the
+      // elements of the array being deleted.
+      const FunctionDecl *OperatorDelete = DE->getOperatorDelete();
+      if (const auto *RD = DTy->getAsCXXRecordDecl()) {
+        if (const CXXDestructorDecl *DD = RD->getDestructor();
+            DD && DD->isCalledByDelete(OperatorDelete))
+          CT = canCalleeThrow(*this, DE, DD);
       }
+
+      // We always look at the exception specification of the operator delete.
+      CT = mergeCanThrow(CT, canCalleeThrow(*this, DE, OperatorDelete));
+
+      // If we know we can throw, we're done.
       if (CT == CT_Can)
         return CT;
     }
@@ -1373,7 +1384,6 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Expr::CXXPseudoDestructorExprClass:
   case Expr::CXXReflectExprClass:
   case Expr::CXXMetafunctionExprClass:
-  case Expr::CXXSpliceSpecifierExprClass:
   case Expr::CXXSpliceExprClass:
   case Expr::StackLocationExprClass:
   case Expr::ExtractLValueExprClass:
@@ -1403,6 +1413,14 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Expr::ConceptSpecializationExprClass:
   case Expr::RequiresExprClass:
   case Expr::HLSLOutArgExprClass:
+  case Stmt::OpenACCEnterDataConstructClass:
+  case Stmt::OpenACCExitDataConstructClass:
+  case Stmt::OpenACCWaitConstructClass:
+  case Stmt::OpenACCCacheConstructClass:
+  case Stmt::OpenACCInitConstructClass:
+  case Stmt::OpenACCShutdownConstructClass:
+  case Stmt::OpenACCSetConstructClass:
+  case Stmt::OpenACCUpdateConstructClass:
     // These expressions can never throw.
     return CT_Cannot;
 
@@ -1413,9 +1431,14 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
     // Most statements can throw if any substatement can throw.
   case Stmt::OpenACCComputeConstructClass:
   case Stmt::OpenACCLoopConstructClass:
+  case Stmt::OpenACCCombinedConstructClass:
+  case Stmt::OpenACCDataConstructClass:
+  case Stmt::OpenACCHostDataConstructClass:
+  case Stmt::OpenACCAtomicConstructClass:
   case Stmt::AttributedStmtClass:
   case Stmt::BreakStmtClass:
   case Stmt::CapturedStmtClass:
+  case Stmt::SYCLKernelCallStmtClass:
   case Stmt::CaseStmtClass:
   case Stmt::CompoundStmtClass:
   case Stmt::ContinueStmtClass:
@@ -1423,11 +1446,15 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Stmt::CoroutineBodyStmtClass:
   case Stmt::CXXCatchStmtClass:
   case Stmt::CXXForRangeStmtClass:
+  case Stmt::CXXIndeterminateExpansionStmtClass:
+  case Stmt::CXXIterableExpansionStmtClass:
   case Stmt::CXXDestructurableExpansionStmtClass:
-  case Stmt::CXXExpansionInitListExprClass:
-  case Stmt::CXXExpansionInitListSelectExprClass:
-  case Stmt::CXXDestructurableExpansionSelectExprClass:
   case Stmt::CXXInitListExpansionStmtClass:
+  case Stmt::CXXIndeterminateExpansionSelectExprClass:
+  case Stmt::CXXIterableExpansionSelectExprClass:
+  case Stmt::CXXDestructurableExpansionSelectExprClass:
+  case Stmt::CXXExpansionInitListSelectExprClass:
+  case Stmt::CXXExpansionInitListExprClass:
   case Stmt::DefaultStmtClass:
   case Stmt::DoStmtClass:
   case Stmt::ForStmtClass:
@@ -1479,6 +1506,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Stmt::OMPSectionsDirectiveClass:
   case Stmt::OMPSimdDirectiveClass:
   case Stmt::OMPTileDirectiveClass:
+  case Stmt::OMPStripeDirectiveClass:
   case Stmt::OMPUnrollDirectiveClass:
   case Stmt::OMPReverseDirectiveClass:
   case Stmt::OMPInterchangeDirectiveClass:

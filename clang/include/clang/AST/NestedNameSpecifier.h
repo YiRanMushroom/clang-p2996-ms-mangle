@@ -31,12 +31,12 @@ namespace clang {
 
 class ASTContext;
 class CXXRecordDecl;
-class CXXSpliceSpecifierExpr;
 class IdentifierInfo;
 class LangOptions;
 class NamespaceAliasDecl;
 class NamespaceDecl;
 struct PrintingPolicy;
+class SpliceSpecifier;
 class Type;
 class TypeLoc;
 
@@ -58,7 +58,8 @@ class NestedNameSpecifier : public llvm::FoldingSetNode {
     StoredDecl = 1,
     StoredTypeSpec = 2,
     StoredTypeSpecWithTemplate = 3,
-    StoredSpliceSpecifier = 4
+    StoredSpliceSpecifier = 4,
+    StoredSpliceSpecifierWithTemplate = 6
   };
 
   /// The nested name specifier that precedes this nested name
@@ -105,8 +106,12 @@ public:
     /// the class it appeared in.
     Super,
 
-    /// A reflection splice specifier, stored as a CXXSpliceSpecifierExpr*.
+    /// A splice specifier, stored as a SpliceSpecifier*.
     Splice,
+
+    /// A splice specifier that was preceded by the 'template'
+    /// keyword, stored as a SpliceSpecifier*.
+    SpliceWithTemplate,
   };
 
 private:
@@ -168,8 +173,9 @@ public:
                                              CXXRecordDecl *RD);
 
   /// Returns the nested name specifier representing a splice specifier.
-  static NestedNameSpecifier *SpliceSpecifier(
-          const ASTContext &Context, const CXXSpliceSpecifierExpr *Expr);
+  static NestedNameSpecifier *SpliceScopeSpecifier(
+        const ASTContext &Context, bool TemplateKW,
+        const SpliceSpecifier *Splice);
 
   /// Return the prefix of this nested name specifier.
   ///
@@ -213,10 +219,11 @@ public:
     return nullptr;
   }
 
-  /// Retrieve the splice expression stored in this nested name specifier.
-  const CXXSpliceSpecifierExpr *getAsSpliceExpr() const {
-    if (Prefix.getInt() == StoredSpliceSpecifier)
-      return (const CXXSpliceSpecifierExpr *)Specifier;
+  /// Retrieve the splice specifier stored in this nested name specifier.
+  const SpliceSpecifier *getAsSplice() const {
+    if (Prefix.getInt() == StoredSpliceSpecifier ||
+        Prefix.getInt() == StoredSpliceSpecifierWithTemplate)
+      return (const SpliceSpecifier *)Specifier;
 
     return nullptr;
   }
@@ -243,7 +250,8 @@ public:
   /// `ns::SomeTemplate<int, MyClass>` instead of
   /// `ns::SomeTemplate<Container::value_type, T>`.
   void print(raw_ostream &OS, const PrintingPolicy &Policy,
-             bool ResolveTemplateArguments = false) const;
+             bool ResolveTemplateArguments = false,
+             bool PrintFinalScopeResOp = true) const;
 
   void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddPointer(Prefix.getOpaqueValue());
@@ -355,9 +363,9 @@ public:
   /// retrieve the type with source-location information.
   TypeLoc getTypeLoc() const;
 
-  /// For a nested-name-specifier that refers to a splice expression, retrive
-  /// the expression.
-  const CXXSpliceSpecifierExpr *getSpliceExpr() const;
+  /// For a nested-name-specifier that refers to a splice specifier, retrive
+  /// the splice specifier.
+  const SpliceSpecifier *getSplice() const;
 
   /// Determines the data length for the entire
   /// nested-name-specifier.
@@ -491,17 +499,20 @@ public:
                  SourceLocation SuperLoc, SourceLocation ColonColonLoc);
 
   /// Turns this (empty) nested-name-specifier into a specifier having a single
-  /// component of splice specifier kind.
+  /// component of splice specialization specifier kind.
   ///
   /// \param Context The AST context in which this nested-name-specifier
   /// resides.
   ///
+  /// \param TemplateKWLoc The location of the 'template' keyword, if present.
+  ///
   /// \param Expr The splice specifier.
   ///
   /// \param ColonColonLoc The location of the trailing '::'.
-  void MakeSpliceSpecifier(ASTContext &Context,
-                           const CXXSpliceSpecifierExpr *Expr,
-                           SourceLocation ColonColonLoc);
+  void MakeSpliceScopeSpecifier(ASTContext &Context,
+                                SourceLocation TemplateKWLoc,
+                                const SpliceSpecifier *Splice,
+                                SourceLocation ColonColonLoc);
 
   /// Make a new nested-name-specifier from incomplete source-location
   /// information.

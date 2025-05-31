@@ -10,8 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
-// ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 
 // <experimental/reflection>
 //
@@ -26,28 +24,30 @@
 #include <print>
 
 
-template <typename T, std::size_t N>
-struct struct_of_arrays_impl;
+template <typename T, size_t N>
+struct struct_of_arrays_impl {
+  struct impl;
 
-consteval auto make_struct_of_arrays(std::meta::info type,
-                                     std::meta::info N) -> std::meta::info {
-  std::vector<std::meta::info> old_members = nonstatic_data_members_of(type);
-  std::vector<std::meta::info> new_members = {};
-  for (std::meta::info member : old_members) {
-    auto array_type = substitute(^^std::array, {type_of(member), N });
-    auto mem_descr = data_member_spec(array_type,
-                                      {.name=identifier_of(member)});
-    new_members.push_back(mem_descr);
+  consteval {
+    constexpr auto ctx = std::meta::access_context::current();
+    std::vector<std::meta::info> old_members = nonstatic_data_members_of(^^T,
+                                                                         ctx);
+    std::vector<std::meta::info> new_members = {};
+    for (std::meta::info member : old_members) {
+        auto array_type = substitute(^^std::array, {
+            type_of(member),
+            std::meta::reflect_constant(N),
+        });
+        auto mem_descr = data_member_spec(array_type, {.name = identifier_of(member)});
+        new_members.push_back(mem_descr);
+    }
+
+    define_aggregate(^^impl, new_members);
   }
-  return std::meta::define_aggregate(substitute(^^struct_of_arrays_impl,
-                                                {type, N}),
-                                     new_members);
-}
+};
 
 template <typename T, size_t N>
-using struct_of_arrays = 
-    [: make_struct_of_arrays(^^T, std::meta::reflect_value(N)) :];
-
+using struct_of_arrays = struct_of_arrays_impl<T, N>::impl;
 
 struct point {
   float x;

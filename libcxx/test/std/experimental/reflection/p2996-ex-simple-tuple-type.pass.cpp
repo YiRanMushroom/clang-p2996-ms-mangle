@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 
 // <experimental/reflection>
@@ -29,9 +28,9 @@
 
 template<typename... Ts> struct Tuple {
   struct storage;
-
-  static_assert(is_type(define_aggregate(^^storage,
-                                         {data_member_spec(^^Ts)...})));
+  consteval {
+    define_aggregate(^^storage, {data_member_spec(^^Ts)...});
+  }
   storage data;
 
   Tuple(): data{} {}
@@ -39,7 +38,8 @@ template<typename... Ts> struct Tuple {
 };
 
 consteval std::meta::info get_nth_field(std::meta::info r, std::size_t n) {
-  return nonstatic_data_members_of(r)[n];
+  constexpr auto ctx = std::meta::access_context::current();
+  return nonstatic_data_members_of(r, ctx)[n];
 }
 
 template<std::size_t I, typename... Ts>

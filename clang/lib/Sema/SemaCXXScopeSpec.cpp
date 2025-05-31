@@ -20,7 +20,6 @@
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/Lookup.h"
-#include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/Template.h"
 #include "llvm/ADT/STLExtras.h"
 using namespace clang;
@@ -166,7 +165,9 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
     return NNS->getAsRecordDecl();
 
   case NestedNameSpecifier::Splice:
-    return TryFindDeclContextOf(NNS->getAsSpliceExpr());
+  case NestedNameSpecifier::SpliceWithTemplate:
+    return TryFindDeclContextOf(
+        const_cast<SpliceSpecifier *>(NNS->getAsSplice()));
   }
 
   llvm_unreachable("Invalid NestedNameSpecifier::Kind!");
@@ -1028,6 +1029,7 @@ bool Sema::ShouldEnterDeclaratorScope(Scope *S, const CXXScopeSpec &SS) {
   case NestedNameSpecifier::TypeSpecWithTemplate:
   case NestedNameSpecifier::Super:
   case NestedNameSpecifier::Splice:
+  case NestedNameSpecifier::SpliceWithTemplate:
     // These are never namespace scopes.
     return true;
   }

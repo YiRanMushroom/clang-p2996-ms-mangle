@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 
 // <experimental/reflection>
 //
@@ -59,18 +58,18 @@ consteval std::meta::info enrich(std::meta::info r) {
   // the first constructor. The copy/move constructors are added at the }, so
   // will be the last ones in the list.
   std::array ctors = {
-      (members_of(^^Choices) |
+      (members_of(^^Choices, std::meta::access_context::current()) |
            std::views::filter(std::meta::is_constructor) |
            std::views::filter(std::meta::is_user_provided)).front()...,
-      (members_of(^^unmatched) |
+      (members_of(^^unmatched, std::meta::access_context::current()) |
            std::views::filter(std::meta::is_constructor) |
            std::views::filter(std::meta::is_user_provided)).front()
   };
   std::array checks = {^^Choices::check..., ^^unmatched::check};
 
   for (auto [check, ctor] : std::views::zip(checks, ctors))
-    if (extract<bool>(reflect_invoke(check, {reflect_value(r)})))
-      return reflect_invoke(ctor, {reflect_value(r)});
+    if (extract<bool>(reflect_invoke(check, {reflect_constant(r)})))
+      return reflect_invoke(ctor, {reflect_constant(r)});
 
   std::unreachable();
 }
@@ -95,5 +94,5 @@ int main() {
   // Demonstration of using 'enrich' to select an overload.
   PrintKind([:enrich(^^metatype):]);                    // "template"
   PrintKind([:enrich(^^type_t):]);                      // "type"
-  PrintKind([:enrich(std::meta::reflect_value(3)):]);  // "unknown kind"
+  PrintKind([:enrich(std::meta::reflect_constant(3)):]);  // "unknown kind"
 }

@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 
 // <experimental/reflection>
 //
@@ -18,6 +17,8 @@
 
 #include <experimental/meta>
 
+
+constexpr auto ctx = std::meta::access_context::unchecked();
 
 template <typename P1, auto P2, template <typename...> class P3>
 struct TCls {
@@ -58,7 +59,7 @@ static_assert(!has_template_arguments(^^NSAlias));
 static_assert(
     !has_template_arguments(
         substitute(^^Concept,
-                   {^^int, std::meta::reflect_value(9), ^^std::vector})));
+                   {^^int, std::meta::reflect_constant(9), ^^std::vector})));
 }  // namespace non_templates
 
                              // ==================
@@ -123,9 +124,10 @@ static_assert(!has_template_arguments(^^WithDependentArgument));
 static_assert(has_template_arguments(^^WithDependentArgument<int, 5>));
 static_assert(
       template_arguments_of(^^WithDependentArgument<int, 5>).size() == 2);
-static_assert(template_arguments_of(^^WithDependentArgument<int, 5>)[0] == ^^int);
+static_assert(template_arguments_of(^^WithDependentArgument<int, 5>)[0] ==
+              ^^int);
 static_assert(template_arguments_of(^^WithDependentArgument<int, 5>)[1] ==
-              std::meta::reflect_value(5));
+              std::meta::reflect_constant(5));
 }  // namespace special_cases
 
                                // ===============
@@ -136,9 +138,12 @@ namespace parameter_packs {
 template <typename... Ts> struct WithTypeParamPack {};
 static_assert(!has_template_arguments(^^WithTypeParamPack));
 static_assert(has_template_arguments(^^WithTypeParamPack<int, bool>));
-static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>).size() == 2);
-static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>)[0] == ^^int);
-static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>)[1] == ^^bool);
+static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>).size() ==
+              2);
+static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>)[0] ==
+              ^^int);
+static_assert(template_arguments_of(^^WithTypeParamPack<int, bool>)[1] ==
+              ^^bool);
 
 struct S {
   int mem;
@@ -193,11 +198,11 @@ static_assert(!has_template_arguments(^^WithReflection));
 static_assert(has_template_arguments(^^WithReflection<^^int>));
 static_assert(template_arguments_of(^^WithReflection<^^int>).size() == 1);
 static_assert(template_arguments_of(^^WithReflection<^^int>)[0] ==
-              std::meta::reflect_value(^^int));
+              std::meta::reflect_constant(^^int));
 
 void instantiations() {
-  [[maybe_unused]] WithReflection<std::meta::reflect_value(nullptr)> wr;
-  FnWithReflection<std::meta::reflect_value(nullptr)>();
+  [[maybe_unused]] WithReflection<std::meta::reflect_constant(nullptr)> wr;
+  FnWithReflection<std::meta::reflect_constant(nullptr)>();
 }
 }  // namespace non_auto_non_types
 
@@ -207,54 +212,66 @@ void instantiations() {
 
 namespace properties_of_non_types {
 template <int P> void fn_int_value() {
-  static_assert(is_value(^^P));
-  static_assert(type_of(^^P) == ^^int);
-  static_assert([:^^P:] == 1);
+  static_assert(is_value(std::meta::reflect_constant(P)));
+  static_assert(type_of(std::meta::reflect_constant(P)) == ^^int);
+  static_assert([:std::meta::reflect_constant(P):] == 1);
 }
 
 template <const int &P> void fn_int_ref() {
-  static_assert(is_object(^^P));
-  static_assert(!is_variable(^^P));
-  if constexpr (is_const(^^P)) {
-    static_assert(type_of(^^P) == ^^const int);
-    static_assert([:^^P:] == 2);
+  static constexpr auto R = std::meta::reflect_object(P);
+
+  static_assert(is_object(R));
+  static_assert(!is_variable(R));
+  if constexpr (is_const(R)) {
+    static_assert(type_of(R) == ^^const int);
+    static_assert([:R:] == 2);
   } else {
-    static_assert(type_of(^^P) == ^^int);
+    static_assert(type_of(R) == ^^int);
   }
 }
 
 template <const int &P> void fn_int_subobject_ref() {
-  static_assert(is_object(^^P));
-  static_assert(!is_variable(^^P));
-  static_assert(type_of(^^P) == ^^const int);
-  static_assert([:^^P:] == 3);
+  static constexpr auto R = std::meta::reflect_object(P);
+
+  static_assert(is_object(R));
+  static_assert(!is_variable(R));
+  static_assert(type_of(R) == ^^const int);
+  static_assert([:R:] == 3);
 }
 
 struct S { int m; };
 
 template <S P> void fn_cls_value() {
-  static_assert(is_object(^^P));
-  static_assert(!is_variable(^^P));  // template-parameter-object
-  static_assert(type_of(^^P) == ^^const S);
-  static_assert([:^^P:].m == 5);
+  static constexpr auto R = std::meta::reflect_object(P);
+
+  static_assert(is_object(R));
+  static_assert(!is_variable(R));  // template-parameter-object
+  static_assert(type_of(R) == ^^const S);
+  static_assert([:R:].m == 5);
 }
 
 template <S &P> void fn_cls_ref() {
-  static_assert(is_object(^^P));
-  static_assert(!is_variable(^^P));
-  static_assert(type_of(^^P) == ^^S);
+  static constexpr auto R = std::meta::reflect_object(P);
+
+  static_assert(is_object(R));
+  static_assert(!is_variable(R));
+  static_assert(type_of(R) == ^^S);
 }
 
 template <void(&P)()> void fn_fn_ref_param() {
-  static_assert(is_function(^^P));
-  static_assert(type_of(^^P) == ^^void());
-  static_assert(identifier_of(^^P) == "instantiations");
+  static constexpr auto R = std::meta::reflect_function(P);
+
+  static_assert(is_function(R));
+  static_assert(type_of(R) == ^^void());
+  static_assert(identifier_of(R) == "instantiations");
 }
 
 template <void(*P)()> void fn_fn_ptr_param() {
-  static_assert(is_value(^^P));
-  static_assert(!is_function(^^P));
-  static_assert(type_of(^^P) == ^^void(*)());
+  static constexpr auto R = std::meta::reflect_constant(P);
+
+  static_assert(is_value(R));
+  static_assert(!is_function(R));
+  static_assert(type_of(R) == ^^void(*)());
 }
 
 void instantiations() {
@@ -316,9 +333,9 @@ template <auto R> void fn() { }
 
 void fn() {
     class S { S(); ~S(); };
-    fn<(members_of(^^S) |
+    fn<(members_of(^^S, ctx) |
             std::views::filter(std::meta::is_constructor)).front()>();
-    fn<(members_of(^^S) |
+    fn<(members_of(^^S, ctx) |
             std::views::filter(std::meta::is_destructor)).front()>();
 }
 }  // namespace bb_clang_p2996_issue_54_regression_test

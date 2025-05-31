@@ -313,7 +313,8 @@ APValue::UnionData::~UnionData () {
 }
 
 APValue::APValue(const APValue &RHS)
-    : Kind(None), UnderlyingTy(), ReflectionDepth() {
+    : Kind(None), AllowConstexprUnknown(RHS.AllowConstexprUnknown),
+      UnderlyingTy(), ReflectionDepth() {
   switch (RHS.Kind) {
   case None:
   case Indeterminate:
@@ -392,14 +393,16 @@ APValue::APValue(const APValue &RHS)
 }
 
 APValue::APValue(APValue &&RHS)
-    : Kind(RHS.Kind), Data(RHS.Data),
-      UnderlyingTy(RHS.UnderlyingTy), ReflectionDepth(RHS.ReflectionDepth) {
+    : Kind(RHS.Kind), AllowConstexprUnknown(RHS.AllowConstexprUnknown),
+      Data(RHS.Data), UnderlyingTy(RHS.UnderlyingTy),
+      ReflectionDepth(RHS.ReflectionDepth) {
   RHS.Kind = None;
 }
 
 APValue &APValue::operator=(const APValue &RHS) {
   if (this != &RHS)
     *this = APValue(RHS);
+
   return *this;
 }
 
@@ -409,6 +412,7 @@ APValue &APValue::operator=(APValue &&RHS) {
       DestroyDataAndMakeUninit();
     Kind = RHS.Kind;
     Data = RHS.Data;
+    AllowConstexprUnknown = RHS.AllowConstexprUnknown;
     UnderlyingTy = RHS.UnderlyingTy;
     ReflectionDepth = RHS.ReflectionDepth;
     RHS.Kind = None;
@@ -444,6 +448,7 @@ void APValue::DestroyDataAndMakeUninit() {
   else if (Kind == Reflection)
     ((ReflectionData *)(char *)&Data)->~ReflectionData();
   Kind = None;
+  AllowConstexprUnknown = false;
 }
 
 bool APValue::needsCleanup() const {
@@ -487,6 +492,11 @@ bool APValue::needsCleanup() const {
 void APValue::swap(APValue &RHS) {
   std::swap(Kind, RHS.Kind);
   std::swap(Data, RHS.Data);
+  // We can't use std::swap w/ bit-fields
+  bool tmp = AllowConstexprUnknown;
+  AllowConstexprUnknown = RHS.AllowConstexprUnknown;
+  RHS.AllowConstexprUnknown = tmp;
+
   std::swap(UnderlyingTy, RHS.UnderlyingTy);
   std::swap(ReflectionDepth, RHS.ReflectionDepth);
 }
@@ -543,6 +553,7 @@ static void profileReflection(llvm::FoldingSetNodeID &ID, APValue V) {
     return;
   }
   case ReflectionKind::Namespace:
+  case ReflectionKind::EntityProxy:
   case ReflectionKind::BaseSpecifier:
   case ReflectionKind::Annotation:
     ID.AddPointer(V.getOpaqueReflectionData());
@@ -919,6 +930,13 @@ Decl *APValue::getReflectedNamespace() const {
           const_cast<void *>(getOpaqueReflectionData()));
 }
 
+UsingShadowDecl *APValue::getReflectedEntityProxy() const {
+  assert(getReflectionKind() == ReflectionKind::EntityProxy &&
+         "not a reflection of an entity proxy");
+  return reinterpret_cast<UsingShadowDecl *>(
+          const_cast<void *>(getOpaqueReflectionData()));
+}
+
 CXXBaseSpecifier *APValue::getReflectedBaseSpecifier() const {
   assert(getReflectionKind() == ReflectionKind::BaseSpecifier &&
          "not a reflection of a base specifier");
@@ -1284,6 +1302,9 @@ void APValue::printPretty(raw_ostream &Out, const PrintingPolicy &Policy,
     case ReflectionKind::Namespace:
       Repr = "namespace";
       break;
+    case ReflectionKind::EntityProxy:
+      Repr = "entity-proxy";
+      break;
     case ReflectionKind::BaseSpecifier:
       Repr = "base-specifier";
       break;
@@ -1444,10 +1465,6 @@ void APValue::MakeArray(unsigned InitElts, unsigned Size) {
   Kind = Array;
 }
 
-MutableArrayRef<APValue::LValuePathEntry>
-setLValueUninit(APValue::LValueBase B, const CharUnits &O, unsigned Size,
-                bool OnePastTheEnd, bool IsNullPtr);
-
 MutableArrayRef<const CXXRecordDecl *>
 APValue::setMemberPointerUninit(const ValueDecl *Member, bool IsDerivedMember,
                                 unsigned Size) {
@@ -1567,9 +1584,9 @@ LinkageInfo LinkageComputer::getLVForValue(const APValue &V,
 }
 
 static QualType unwrapReflectedType(QualType QT) {
-  bool UnwrapAliases = false;
   bool IsConst = QT.isConstQualified();
   bool IsVolatile = QT.isVolatileQualified();
+  bool UnwrapAliases = (IsConst || IsVolatile);
 
   void *AsPtr;
   do {
@@ -1630,6 +1647,7 @@ void APValue::setReflection(ReflectionKind RK, const void *Ptr) {
   case ReflectionKind::Declaration:
   case ReflectionKind::Template:
   case ReflectionKind::Namespace:
+  case ReflectionKind::EntityProxy:
   case ReflectionKind::BaseSpecifier:
   case ReflectionKind::DataMemberSpec:
   case ReflectionKind::Annotation:

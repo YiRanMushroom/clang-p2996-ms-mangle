@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: %clang_cc1 %s -std=c++23 -freflection -freflection-new-syntax
+// RUN: %clang_cc1 %s -std=c++23 -freflection -verify
 
 // Reflecting Types
 using info = decltype(^^void);
@@ -128,6 +128,8 @@ constexpr info info_tmplparam = foo<int>();
 
 namespace ns {}
 constexpr info info_ns = ^^ns;
+namespace ns {}
+static_assert(info_ns == ^^ns);
 
 // Reflection as a default initializer for a class member
 class WithDefaultInitializer {
@@ -148,6 +150,54 @@ struct S {};
 static_assert(^^S const == ^^const S);
 static_assert(^^S volatile == ^^volatile S);
 }  // namespace east_west_cv
+
+                               // ==============
+                               // self_reference
+                               // ==============
+
+namespace self_reference {
+struct S {
+  consteval S() {}
+
+  decltype(^^::) k = ^^S::k;
+};
+
+consteval int fn(decltype(^^::) x = ^^x) { return 0; }
+constexpr int x = fn();
+}  // namspace self_reference
+
+                              // =================
+                              // enclosing_lambdas
+                              // =================
+
+namespace enclosing_lambdas {
+static int s1;
+void fn() {
+  int l1;
+  static int s2;
+  constexpr auto rl1 = ^^l1;
+  (void) [] -> decltype(^^s1, ^^l1, s2) {
+    // expected-error@-1 {{intervening lambda expression}}
+    int l2;
+
+    constexpr auto rl1_2 = ^^l1;
+      // expected-error@-1 {{intervening lambda expression}}
+    constexpr auto rl2 = ^^l2;
+  };
+}
+}  // namespace enclosing_lambdas
+
+                            // ====================
+                            // requires_expressions
+                            // ====================
+
+namespace requires_expressions {
+void fn(int p) {
+    (void) requires(int a) { ^^p; };
+    (void) requires(int a) { ^^a; };
+      // expected-error@-1 {{local parameter of a requires-expression}}
+}
+}  // namespace requires_expressions
 
                    // =======================================
                    // bb_clang_p2996_issue_35_regression_test
@@ -183,3 +233,28 @@ tfoo<int> instantiation;
 static_assert(^^foo == ^^::bb_clang_p2996_issue_73_regression_test::foo);
 static_assert(^^tfoo == ^^::bb_clang_p2996_issue_73_regression_test::tfoo);
 }  // namespace bb_clang_p2996_issue_73_regression_test
+
+                   // =======================================
+                   // bb_clang_p2996_issue_11_regression_test
+                   // =======================================
+
+namespace bb_clang_p2996_issue_11_regression_test {
+constexpr auto a = ^^:: != ^^int &;
+constexpr auto b = ^^:: != ^^int &&;
+constexpr auto c = ^^:: != ^^int() &;
+constexpr auto d = ^^:: != ^^int() &&;
+
+constexpr auto e = ^^:: != ^^int & true;
+  //expected-error@-1 {{after top level declarator}} \
+  //expected-warning@-1 {{'&' binds to reflection operand}}
+constexpr auto f = ^^:: != ^^int && true;
+  //expected-error@-1 {{after top level declarator}} \
+  //expected-warning@-1 {{'&&' binds to reflection operand}}
+constexpr auto g = ^^:: != ^^int() & true;
+  //expected-error@-1 {{after top level declarator}} \
+  //expected-warning@-1 {{'&' binds to reflection operand}}
+constexpr auto h = ^^:: != ^^int() && true;
+  //expected-error@-1 {{after top level declarator}} \
+  //expected-warning@-1 {{'&&' binds to reflection operand}}
+
+}  // namespace bb_clang_p2996_issue_11_regression_test

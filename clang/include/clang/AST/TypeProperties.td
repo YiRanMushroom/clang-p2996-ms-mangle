@@ -102,12 +102,15 @@ let Class = MemberPointerType in {
   def : Property<"pointeeType", QualType> {
     let Read = [{ node->getPointeeType() }];
   }
-  def : Property<"baseType", QualType> {
-    let Read = [{ QualType(node->getClass(), 0) }];
+  def : Property<"Qualifier", NestedNameSpecifier> {
+    let Read = [{ node->getQualifier() }];
+  }
+  def : Property<"Cls", DeclRef> {
+    let Read = [{ node->getMostRecentCXXRecordDecl() }];
   }
 
   def : Creator<[{
-    return ctx.getMemberPointerType(pointeeType, baseType.getTypePtr());
+    return ctx.getMemberPointerType(pointeeType, Qualifier, cast_or_null<CXXRecordDecl>(Cls));
   }]>;
 }
 
@@ -475,12 +478,12 @@ let Class = PackIndexingType in {
   def : Property<"indexExpression", ExprRef> {
     let Read = [{ node->getIndexExpr() }];
   }
-  def : Property<"expandsToEmptyPack", Bool> {
-    let Read = [{ node->expandsToEmptyPack() }];
+  def : Property<"isFullySubstituted", Bool> {
+    let Read = [{ node->isFullySubstituted() }];
   }
 
   def : Creator<[{
-    return ctx.getPackIndexingType(pattern, indexExpression, expandsToEmptyPack);
+    return ctx.getPackIndexingType(pattern, indexExpression, isFullySubstituted);
   }]>;
 }
 
@@ -852,15 +855,19 @@ let Class = PackExpansionType in {
 }
 
 let Class = ReflectionSpliceType in {
+  def : Property<"typenameLoc", SourceLocation> {
+    let Read = [{ node->getTypenameKWLoc() }];
+  }
+  def : Property<"spliceSpecifier", SpliceSpecifierRef> {
+    let Read = [{ node->getSplice() }];
+  }
   def : Property<"underlyingType", QualType> {
     let Read = [{ node->getUnderlyingType() }];
   }
-  def : Property<"operand", ExprRef> {
-    let Read = [{ node->getOperand() }];
-  }
 
   def : Creator<[{
-    return ctx.getReflectionSpliceType(operand, underlyingType);
+    return ctx.getReflectionSpliceType(typenameLoc, spliceSpecifier,
+                                       underlyingType);
   }]>;
 }
 

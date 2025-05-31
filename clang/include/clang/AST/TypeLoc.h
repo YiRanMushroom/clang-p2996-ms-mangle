@@ -141,6 +141,7 @@ public:
   }
 
   /// Get the pointer where source information is stored.
+  // FIXME: This should provide a type-safe interface.
   void *getOpaqueData() const {
     return Data;
   }
@@ -399,6 +400,7 @@ public:
     unsigned extraAlign = asDerived()->getExtraLocalDataAlignment();
     size = llvm::alignTo(size, extraAlign);
     size += asDerived()->getExtraLocalDataSize();
+    size = llvm::alignTo(size, asDerived()->getLocalDataAlignment());
     return size;
   }
 
@@ -1356,7 +1358,7 @@ public:
 };
 
 struct MemberPointerLocInfo : public PointerLikeLocInfo {
-  TypeSourceInfo *ClassTInfo;
+  void *QualifierData = nullptr;
 };
 
 /// Wrapper for source info for member pointers.
@@ -1372,28 +1374,32 @@ public:
     setSigilLoc(Loc);
   }
 
-  const Type *getClass() const {
-    return getTypePtr()->getClass();
+  NestedNameSpecifierLoc getQualifierLoc() const {
+    return NestedNameSpecifierLoc(getTypePtr()->getQualifier(),
+                                  getLocalData()->QualifierData);
   }
 
-  TypeSourceInfo *getClassTInfo() const {
-    return getLocalData()->ClassTInfo;
-  }
-
-  void setClassTInfo(TypeSourceInfo* TI) {
-    getLocalData()->ClassTInfo = TI;
+  void setQualifierLoc(NestedNameSpecifierLoc QualifierLoc) {
+    assert(QualifierLoc.getNestedNameSpecifier() ==
+               getTypePtr()->getQualifier() &&
+           "Inconsistent nested-name-specifier pointer");
+    getLocalData()->QualifierData = QualifierLoc.getOpaqueData();
   }
 
   void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setSigilLoc(Loc);
-    setClassTInfo(nullptr);
+    if (auto *Qualifier = getTypePtr()->getQualifier()) {
+      NestedNameSpecifierLocBuilder Builder;
+      Builder.MakeTrivial(Context, Qualifier, Loc);
+      setQualifierLoc(Builder.getWithLocInContext(Context));
+    } else
+      getLocalData()->QualifierData = nullptr;
   }
 
   SourceRange getLocalSourceRange() const {
-    if (TypeSourceInfo *TI = getClassTInfo())
-      return SourceRange(TI->getTypeLoc().getBeginLoc(), getStarLoc());
-    else
-      return SourceRange(getStarLoc());
+    if (NestedNameSpecifierLoc QL = getQualifierLoc())
+      return SourceRange(QL.getBeginLoc(), getStarLoc());
+    return SourceRange(getStarLoc());
   }
 };
 
@@ -2633,39 +2639,35 @@ public:
   }
 };
 
-struct ReflectionSpliceTypeLocInfo {
-  SourceLocation LSpliceLoc, RSpliceLoc;
-};
+struct ReflectionSpliceTypeLocInfo { };
 
 class ReflectionSpliceTypeLoc
   : public ConcreteTypeLoc<UnqualTypeLoc, ReflectionSpliceTypeLoc,
                            ReflectionSpliceType, ReflectionSpliceTypeLocInfo> {
 public:
-  Expr *getOperand() const {
-    return getTypePtr()->getOperand();
+  SourceLocation getTypenameKWLoc() const {
+    return getTypePtr()->getTypenameKWLoc();
   }
 
-  SourceLocation getLSpliceLoc() const {
-    return this->getLocalData()->LSpliceLoc;
+  SpliceSpecifier *getSplice() const {
+    return getTypePtr()->getSplice();
   }
 
-  void setLSpliceLoc(SourceLocation Loc) {
-    this->getLocalData()->LSpliceLoc = Loc;
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
+    // nothing to do
   }
-
-  SourceLocation getRSpliceLoc() const {
-    return this->getLocalData()->RSpliceLoc;
-  }
-
-  void setRSpliceLoc(SourceLocation Loc) {
-    this->getLocalData()->RSpliceLoc = Loc;
-  }
-
-  void initializeLocal(ASTContext &Context, SourceLocation Loc);
 
   SourceRange getLocalSourceRange() const {
-    return SourceRange(getLSpliceLoc(), getRSpliceLoc());
+    SpliceSpecifier *Splice = getTypePtr()->getSplice();
+
+    SourceLocation Begin = getTypePtr()->getTypenameKWLoc();
+    if (Begin.isInvalid())
+      Begin = Splice->getBeginLoc();
+    return SourceRange(Begin, Splice->getEndLoc());
   }
+
+  // LocalData is empty and TypeLocBuilder doesn't handle DataSize 1.
+  unsigned getLocalDataSize() const { return 0; }
 };
 
 struct AtomicTypeLocInfo {

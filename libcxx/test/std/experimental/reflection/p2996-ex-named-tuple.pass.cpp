@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 
 // <experimental/reflection>
@@ -58,11 +57,13 @@ consteval auto make_named_tuple(std::meta::info type, Tags... tags) {
 }
 
 struct R;
-static_assert(is_type(make_named_tuple(^^R, pair<int, "x">{},
-                                           pair<double, "y">{})));
+consteval {
+  make_named_tuple(^^R, pair<int, "x">{}, pair<double, "y">{});
+}
 
-static_assert(type_of(nonstatic_data_members_of(^^R)[0]) == ^^int);
-static_assert(type_of(nonstatic_data_members_of(^^R)[1]) == ^^double);
+constexpr auto ctx = std::meta::access_context::current();
+static_assert(type_of(nonstatic_data_members_of(^^R, ctx)[0]) == ^^int);
+static_assert(type_of(nonstatic_data_members_of(^^R, ctx)[1]) == ^^double);
 
 int main() {
   [[maybe_unused]] auto r = R{.x=1, .y=2.0};

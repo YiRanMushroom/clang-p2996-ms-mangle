@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: %clang_cc1 %s -std=c++23 -freflection -freflection-new-syntax
+// RUN: %clang_cc1 %s -std=c++23 -freflection
 
 using info = decltype(^^int);
 
@@ -89,8 +89,7 @@ consteval auto decr(typename [:r_int:] p) -> [:r_const_int:] {
 }
 static_assert(decr(13) == 12);
 
-// 'typename' should be optional in parameter declarations.
-void fn([:r_int:]);
+void fn([:r_int:] a);
 void fn(typename [:r_int:]);
 class S {
   S([:r_int:]);
@@ -199,6 +198,30 @@ static_assert(int(B) == 1);
 }  // namespace with_enum_types
 
                              // ===================
+                             // with_entity_proxies
+                             // ===================
+
+namespace with_entity_proxies {
+namespace NS {
+namespace Inner {
+struct S { int a = 11; };
+template <typename T> struct TCls { T t; void fn(); };
+}  // namespace Inner
+
+using Inner::S;
+using Inner::TCls;
+}  // namespace NS
+
+// splice-type-specifiers
+static_assert(typename [:^^NS::S:]{}.a == 11);
+static_assert(typename [:^^NS::TCls:]<int>{4}.t == 4);
+
+// splice-scope-specifiers
+static_assert(&[:^^NS::S:]::a == &NS::Inner::S::a);
+static_assert(&template [:^^NS::TCls:]<int>::fn == &NS::Inner::TCls<int>::fn);
+}  // namespace with_entity_proxies
+
+                             // ===================
                              // friend_declarations
                              // ===================
 
@@ -271,26 +294,11 @@ using AliasFloat = T;
 
 // Simple requirement
 template <typename T>
-constexpr auto simple_addable = requires(T a, T b) { [:^^a:] + b; };
-template <typename T>
-constexpr auto simple_addable2 = requires(T a, T b) { a + [:^^b:]; };
-template <typename T>
-constexpr auto simple_addable3 = requires(T a, T b) { [:^^a:] + [:^^b:]; };
-template <typename T>
-constexpr auto simple_addable_nns = 
+constexpr auto simple_addable_nns =
   requires(T b) { [:^^Namespace:]::Addable() + b; };
 constexpr auto simple_addable_nns2 = requires { [:^^Namespace:]::Addable(); };
 template <typename T>
 constexpr auto simple_dep_nns = requires { typename [:^^T:]::Nested(); };
-
-static_assert(simple_addable<Addable>);
-static_assert(!simple_addable<NonAddable>);
-
-static_assert(simple_addable2<Addable>);
-static_assert(!simple_addable2<NonAddable>);
-
-static_assert(simple_addable3<Addable>);
-static_assert(!simple_addable3<NonAddable>);
 
 static_assert(simple_addable_nns<Addable>);
 static_assert(!simple_addable_nns<NonAddable>);
@@ -308,19 +316,19 @@ template <typename T>
 constexpr auto type_nested = requires { typename [:^^T:]::Nested; };
 
 template <typename T>
-constexpr auto type_class_is_float = 
+constexpr auto type_class_is_float =
   requires { typename RequiresFloat<[:^^T:]>; };
 
 template <typename T>
-constexpr auto type_class_is_float2 = 
+constexpr auto type_class_is_float2 =
   requires { typename [:^^RequiresFloat<T>:]; };
 
 template <typename T>
-constexpr auto type_alias_is_float = 
+constexpr auto type_alias_is_float =
   requires { typename AliasFloat<[:^^T:]>; };
 
 template <typename T>
-constexpr auto type_alias_is_float2 = 
+constexpr auto type_alias_is_float2 =
   requires { typename [:^^AliasFloat<T>:]; };
 
 static_assert(type<int>);
@@ -340,7 +348,7 @@ static_assert(!type_alias_is_float2<int>);
 
 // Compound requirements
 template <typename T>
-constexpr auto compound_returns_addable = 
+constexpr auto compound_returns_addable =
   requires { {typename [:^^T:]()} -> same_as<Addable>; };
 
 template <typename T>
@@ -348,11 +356,11 @@ constexpr auto compound_returns_addable2 =
   requires { {T()} -> same_as<[:^^Addable:]>; };
 
 template <typename T>
-constexpr auto compound_returns_addable3 = 
+constexpr auto compound_returns_addable3 =
   requires { {[:^^Namespace:]::Addable()} -> same_as<[:^^T:]>; };
 
 template <typename T>
-constexpr auto compound_returns_addable4 = 
+constexpr auto compound_returns_addable4 =
   requires { {T()} -> same_as<[:^^Namespace:]::Addable>; };
 
 static_assert(compound_returns_addable<Addable>);
@@ -369,11 +377,11 @@ static_assert(!compound_returns_addable4<NonAddable>);
 
 // Nested requirements
 template <typename T>
-constexpr auto nested_addable = requires { 
+constexpr auto nested_addable = requires {
   requires same_as<T, [:^^Addable:]>;
 };
 template <typename T>
-constexpr auto nested_addable2 = requires { 
+constexpr auto nested_addable2 = requires {
   requires same_as<T, [:^^Namespace:]::Addable>;
 };
 

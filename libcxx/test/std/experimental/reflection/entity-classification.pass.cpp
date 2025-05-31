@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 
 // <experimental/reflection>
 //
@@ -18,6 +17,9 @@
 
 #include <experimental/meta>
 #include <tuple>
+
+
+constexpr auto ctx = std::meta::access_context::current();
 
 struct type {};
 using alias = type;
@@ -61,24 +63,24 @@ static_assert(!is_user_provided(null_reflection));
 static_assert(!is_user_declared(null_reflection));
 static_assert(!is_data_member_spec(null_reflection));
 
-static_assert(!is_type(std::meta::reflect_value(3)));
-static_assert(!is_complete_type(std::meta::reflect_value(3)));
-static_assert(!is_type_alias(std::meta::reflect_value(3)));
-static_assert(!is_namespace_alias(std::meta::reflect_value(3)));
-static_assert(!is_function(std::meta::reflect_value(3)));
-static_assert(!is_variable(std::meta::reflect_value(3)));
-static_assert(!is_namespace(std::meta::reflect_value(3)));
-static_assert(!is_template(std::meta::reflect_value(3)));
-static_assert(!is_function_template(std::meta::reflect_value(3)));
-static_assert(!is_variable_template(std::meta::reflect_value(3)));
-static_assert(!is_class_template(std::meta::reflect_value(3)));
-static_assert(!is_alias_template(std::meta::reflect_value(3)));
-static_assert(!is_concept(std::meta::reflect_value(3)));
-static_assert(!is_base(std::meta::reflect_value(3)));
-static_assert(is_value(std::meta::reflect_value(3)));
-static_assert(!is_object(std::meta::reflect_value(3)));
-static_assert(!is_enumerator(std::meta::reflect_value(3)));
-static_assert(!is_data_member_spec(std::meta::reflect_value(3)));
+static_assert(!is_type(std::meta::reflect_constant(3)));
+static_assert(!is_complete_type(std::meta::reflect_constant(3)));
+static_assert(!is_type_alias(std::meta::reflect_constant(3)));
+static_assert(!is_namespace_alias(std::meta::reflect_constant(3)));
+static_assert(!is_function(std::meta::reflect_constant(3)));
+static_assert(!is_variable(std::meta::reflect_constant(3)));
+static_assert(!is_namespace(std::meta::reflect_constant(3)));
+static_assert(!is_template(std::meta::reflect_constant(3)));
+static_assert(!is_function_template(std::meta::reflect_constant(3)));
+static_assert(!is_variable_template(std::meta::reflect_constant(3)));
+static_assert(!is_class_template(std::meta::reflect_constant(3)));
+static_assert(!is_alias_template(std::meta::reflect_constant(3)));
+static_assert(!is_concept(std::meta::reflect_constant(3)));
+static_assert(!is_base(std::meta::reflect_constant(3)));
+static_assert(is_value(std::meta::reflect_constant(3)));
+static_assert(!is_object(std::meta::reflect_constant(3)));
+static_assert(!is_enumerator(std::meta::reflect_constant(3)));
+static_assert(!is_data_member_spec(std::meta::reflect_constant(3)));
 
 static_assert(is_type(^^type));
 static_assert(is_complete_type(^^type));
@@ -559,8 +561,8 @@ static_assert(is_complete_type(^^IncompleteTClsAlias<int>));
 struct Base {};
 struct Derived : Base {};
 static_assert(!is_base(^^Base));
-static_assert(!is_type(bases_of(^^Derived)[0]));
-static_assert(is_base(bases_of(^^Derived)[0]));
+static_assert(!is_type(bases_of(^^Derived, ctx)[0]));
+static_assert(is_base(bases_of(^^Derived, ctx)[0]));
 
               // =================================================
               // test_is_structured_binding_and_related_edge_cases
@@ -617,7 +619,7 @@ static_assert(!is_variable(^^x5));
 static_assert(!is_variable(^^y5));
 
 static_assert(!is_structured_binding(^^var));
-static_assert(!is_structured_binding(std::meta::reflect_value(3)));
+static_assert(!is_structured_binding(std::meta::reflect_constant(3)));
 } // namespace test_is_structured_binding_and_related_edge_cases
 
                      // ==================================
@@ -631,29 +633,29 @@ struct S3 { S3(); };
 S3::S3() {}
 
 static_assert(
-    (members_of(^^S1) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_provided) |
-                       std::ranges::to<std::vector>()).size() == 0);
+    (members_of(^^S1, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_provided) |
+                             std::ranges::to<std::vector>()).size() == 0);
 static_assert(
-    (members_of(^^S1) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_declared) |
-                       std::ranges::to<std::vector>()).size() == 0);
+    (members_of(^^S1, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_declared) |
+                             std::ranges::to<std::vector>()).size() == 0);
 static_assert(
-    (members_of(^^S2) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_provided) |
-                       std::ranges::to<std::vector>()).size() == 0);
+    (members_of(^^S2, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_provided) |
+                             std::ranges::to<std::vector>()).size() == 0);
 static_assert(
-    (members_of(^^S2) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_declared) |
-                       std::ranges::to<std::vector>()).size() == 2);
+    (members_of(^^S2, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_declared) |
+                             std::ranges::to<std::vector>()).size() == 2);
 static_assert(
-    (members_of(^^S3) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_provided) |
-                       std::ranges::to<std::vector>()).size() == 1);
+    (members_of(^^S3, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_provided) |
+                             std::ranges::to<std::vector>()).size() == 1);
 static_assert(
-    (members_of(^^S3) | std::views::filter(std::meta::is_constructor) |
-                       std::views::filter(std::meta::is_user_declared) |
-                       std::ranges::to<std::vector>()).size() == 1);
+    (members_of(^^S3, ctx) | std::views::filter(std::meta::is_constructor) |
+                             std::views::filter(std::meta::is_user_declared) |
+                             std::ranges::to<std::vector>()).size() == 1);
 }  // namespace test_is_user_provided_and_declared
 
 

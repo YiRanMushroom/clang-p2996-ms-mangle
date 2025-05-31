@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-unneeded-internal-declaration
 
 // <experimental/reflection>
@@ -60,7 +59,7 @@ static_assert(has_static_storage_duration(^^i1));
 static_assert(!has_thread_storage_duration(^^i1));
 static_assert(!has_automatic_storage_duration(^^i1));
 
-static int i2;
+[[maybe_unused]] static int i2;
 static_assert(has_static_storage_duration(^^i2));
 static_assert(!has_thread_storage_duration(^^i2));
 static_assert(!has_automatic_storage_duration(^^i2));
@@ -70,12 +69,12 @@ static_assert(!has_static_storage_duration(^^i3));
 static_assert(has_thread_storage_duration(^^i3));
 static_assert(!has_automatic_storage_duration(^^i3));
 
-static thread_local int i4;
+[[maybe_unused]] static thread_local int i4;
 static_assert(!has_static_storage_duration(^^i4));
 static_assert(has_thread_storage_duration(^^i4));
 static_assert(!has_automatic_storage_duration(^^i4));
 
-void foo(float parameter_var) {
+void foo([[maybe_unused]] float parameter_var) {
     static_assert(!has_static_storage_duration(^^parameter_var));
     static_assert(!has_thread_storage_duration(^^parameter_var));
     static_assert(has_automatic_storage_duration(^^parameter_var));
@@ -85,13 +84,13 @@ void foo(float parameter_var) {
     static_assert(!has_thread_storage_duration(^^nonstatic_var));
     static_assert(has_automatic_storage_duration(^^nonstatic_var));
 
-    int& ref_to_nonstatic_var = nonstatic_var;
+    [[maybe_unused]] int& ref_to_nonstatic_var = nonstatic_var;
     static_assert(!has_static_storage_duration(^^ref_to_nonstatic_var));
     static_assert(!has_thread_storage_duration(^^ref_to_nonstatic_var));
     static_assert(has_automatic_storage_duration(^^ref_to_nonstatic_var));
 
     // assert the funcs check SD of the reference instead of the target object
-    static int& static_ref_to_var = nonstatic_var;
+    [[maybe_unused]] static int& static_ref_to_var = nonstatic_var;
     static_assert(has_static_storage_duration(^^static_ref_to_var));
     static_assert(!has_thread_storage_duration(^^static_ref_to_var));
     static_assert(!has_automatic_storage_duration(^^static_ref_to_var));
@@ -101,12 +100,12 @@ void foo(float parameter_var) {
     static_assert(!has_thread_storage_duration(^^static_var));
     static_assert(!has_automatic_storage_duration(^^static_var));
 
-    int& ref_to_static_var = static_var;
+    [[maybe_unused]] int& ref_to_static_var = static_var;
     static_assert(!has_static_storage_duration(^^ref_to_static_var));
     static_assert(!has_thread_storage_duration(^^ref_to_static_var));
     static_assert(has_automatic_storage_duration(^^ref_to_static_var));
 
-    thread_local int tl_var;
+    [[maybe_unused]] thread_local int tl_var;
     static_assert(!has_static_storage_duration(^^tl_var));
     static_assert(has_thread_storage_duration(^^tl_var));
     static_assert(!has_automatic_storage_duration(^^tl_var));
@@ -129,7 +128,8 @@ void foo(float parameter_var) {
 }
 
 template <auto V> struct TCls {};
-static_assert(!has_static_storage_duration(template_arguments_of(^^TCls<5>)[0]));
+static_assert(
+  !has_static_storage_duration(template_arguments_of(^^TCls<5>)[0]));
 static_assert(
   !has_thread_storage_duration(template_arguments_of(^^TCls<5>)[0]));
 static_assert(
@@ -142,7 +142,7 @@ static_assert(
 static_assert(
   !has_automatic_storage_duration(template_arguments_of(^^TCls<S{}>)[0]));
 
-template <auto K> constexpr auto R = ^^K;
+template <auto K> constexpr auto R = std::meta::reflect_object(K);
 static_assert(has_static_storage_duration(R<S{}>));
 static_assert(!has_thread_storage_duration(R<S{}>));
 static_assert(!has_automatic_storage_duration(R<S{}>));
@@ -154,9 +154,9 @@ static_assert(has_static_storage_duration(first));
 static_assert(!has_thread_storage_duration(first));
 static_assert(!has_automatic_storage_duration(first));
 
-static_assert(!has_static_storage_duration(std::meta::reflect_value(4)));
-static_assert(!has_thread_storage_duration(std::meta::reflect_value(4)));
-static_assert(!has_automatic_storage_duration(std::meta::reflect_value(4)));
+static_assert(!has_static_storage_duration(std::meta::reflect_constant(4)));
+static_assert(!has_thread_storage_duration(std::meta::reflect_constant(4)));
+static_assert(!has_automatic_storage_duration(std::meta::reflect_constant(4)));
 }  // namespace storage_class_and_duration
 
                                    // =======
@@ -165,7 +165,7 @@ static_assert(!has_automatic_storage_duration(std::meta::reflect_value(4)));
 
 namespace linkage {
 int global;
-static int s_global;
+[[maybe_unused]] static int s_global;
 
 namespace { struct internal_linkage_type; }
 struct external_linkage_type;
@@ -230,28 +230,28 @@ template <typename T> int TVar;
 
 static_assert(!has_linkage(^^::));
 static_assert(!has_linkage(^^::linkage));
-static_assert(!has_linkage(std::meta::reflect_value(3)));
+static_assert(!has_linkage(std::meta::reflect_constant(3)));
 static_assert(!has_linkage(^^int));
 static_assert(!has_linkage(^^TCls));
 static_assert(!has_linkage(^^TFn));
 static_assert(!has_linkage(^^TVar));
 static_assert(!has_internal_linkage(^^::));
 static_assert(!has_internal_linkage(^^::linkage));
-static_assert(!has_internal_linkage(std::meta::reflect_value(3)));
+static_assert(!has_internal_linkage(std::meta::reflect_constant(3)));
 static_assert(!has_internal_linkage(^^int));
 static_assert(!has_internal_linkage(^^TCls));
 static_assert(!has_internal_linkage(^^TFn));
 static_assert(!has_internal_linkage(^^TVar));
 static_assert(!has_module_linkage(^^::));
 static_assert(!has_module_linkage(^^::linkage));
-static_assert(!has_module_linkage(std::meta::reflect_value(3)));
+static_assert(!has_module_linkage(std::meta::reflect_constant(3)));
 static_assert(!has_module_linkage(^^int));
 static_assert(!has_module_linkage(^^TCls));
 static_assert(!has_module_linkage(^^TFn));
 static_assert(!has_module_linkage(^^TVar));
 static_assert(!has_external_linkage(^^::));
 static_assert(!has_external_linkage(^^::linkage));
-static_assert(!has_external_linkage(std::meta::reflect_value(3)));
+static_assert(!has_external_linkage(std::meta::reflect_constant(3)));
 static_assert(!has_external_linkage(^^int));
 static_assert(!has_external_linkage(^^TCls));
 static_assert(!has_external_linkage(^^TFn));

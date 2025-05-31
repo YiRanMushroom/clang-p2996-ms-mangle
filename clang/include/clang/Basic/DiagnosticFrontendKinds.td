@@ -99,11 +99,11 @@ def warn_toc_unsupported_type : Warning<"-mtocdata option is ignored "
 
 def err_fe_invalid_code_complete_file : Error<
     "cannot locate code-completion file %0">, DefaultFatal;
-def err_fe_reflection_incompatible_with_blocks : Error<
-    "cannot specify both '-freflection' and '-fblocks' without "
-    "'-freflection-new-syntax'">, DefaultFatal;
 def err_fe_parameter_reflection_without_reflection : Error<
     "cannot specify '-fparameter-reflection' without '-freflection'">,
+    DefaultFatal;
+def err_fe_entity_proxy_reflection_without_reflection : Error<
+    "cannot specify '-fentity-proxy-reflection' without '-freflection'">,
     DefaultFatal;
 def err_fe_dependency_file_requires_MT : Error<
     "-dependency-file requires at least one -MT or -MQ option">;
@@ -181,11 +181,11 @@ def err_verify_invalid_content : Error<
 def err_verify_missing_regex : Error<
     "cannot find start of regex ('{{') in %0">;
 def err_verify_inconsistent_diags : Error<
-    "'%0' diagnostics %select{expected|seen}1 but not %select{seen|expected}1: "
-    "%2">;
+    "%select{|'%1-%2' }0diagnostics %select{with '%2' severity |}0"
+    "%select{expected|seen}3 but not %select{seen|expected}3: "
+    "%4">;
 def err_verify_invalid_no_diags : Error<
-    "%select{expected|'%0-no-diagnostics'}1 directive cannot follow "
-    "%select{'%0-no-diagnostics' directive|other expected directives}1">;
+    "'%0' directive cannot follow %select{'%2' directive|other expected directives}1">;
 def err_verify_no_directives : Error<
     "no expected directives found: consider use of '%0-no-diagnostics'">;
 def err_verify_nonconst_addrspace : Error<
@@ -272,7 +272,7 @@ def err_test_module_file_extension_version : Error<
   "(%3.%4)">;
 
 def warn_eagerly_load_for_standard_cplusplus_modules : Warning<
-  "the form '-fmodule-file=<BMI-path>' is deprecated for standard C++ named modules;"
+  "the form '-fmodule-file=<BMI-path>' is deprecated for standard C++ named modules; "
   "consider to use '-fmodule-file=<module-name>=<BMI-path>' instead">,
   InGroup<DiagGroup<"eager-load-cxx-named-modules">>;
 
@@ -297,6 +297,8 @@ def warn_function_always_inline_attribute_mismatch : Warning<
   "inlining may change runtime behaviour">, InGroup<AArch64SMEAttributes>;
 def err_function_always_inline_new_za : Error<
   "always_inline function %0 has new za state">;
+def err_function_always_inline_new_zt0
+    : Error<"always_inline function %0 has new zt0 state">;
 
 def warn_avx_calling_convention
     : Warning<"AVX vector %select{return|argument}0 of type %1 without '%2' "
@@ -393,4 +395,12 @@ def warn_hlsl_langstd_minimal :
   Warning<"support for HLSL language version %0 is incomplete, "
           "recommend using %1 instead">,
   InGroup<HLSLDXCCompat>;
+
+// ClangIR frontend errors
+def err_cir_to_cir_transform_failed : Error<
+    "CIR-to-CIR transformation failed">, DefaultFatal;
+
+def err_cir_verification_failed_pre_passes : Error<
+    "CIR module verification error before running CIR-to-CIR passes">,
+    DefaultFatal;
 }

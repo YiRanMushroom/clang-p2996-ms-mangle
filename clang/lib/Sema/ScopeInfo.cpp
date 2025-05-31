@@ -13,7 +13,6 @@
 
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/AST/Decl.h"
-#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -40,7 +39,7 @@ void FunctionScopeInfo::Clear() {
   FirstCXXOrObjCTryLoc = SourceLocation();
   FirstSEHTryLoc = SourceLocation();
   FirstVLALoc = SourceLocation();
-  FoundImmediateEscalatingExpression = false;
+  FoundImmediateEscalatingConstruct = false;
 
   // Coroutine state
   FirstCoroutineStmtLoc = SourceLocation();

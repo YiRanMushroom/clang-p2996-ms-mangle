@@ -11,7 +11,6 @@
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // REQUIRES: stdlib=libc++
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 // ADDITIONAL_COMPILE_FLAGS: -Wno-unneeded-internal-declaration
 
@@ -28,20 +27,21 @@ static_assert(std::string_view(reflected_loc.file_name()) == loc.file_name());
 static_assert(reflected_loc.line() == loc.line());
 static_assert(reflected_loc.column() == 32);
 
-void foo(int param) {
+void foo([[maybe_unused]] int param) {
     constexpr std::string_view FnName = __PRETTY_FUNCTION__;
 
     static_assert(source_location_of(^^param).function_name() == FnName);
 
-    int var;
+    [[maybe_unused]] int var;
     static_assert(source_location_of(^^var).function_name() == FnName);
 
     struct S { std::source_location mem; };
     static_assert(source_location_of(^^S).function_name() == FnName);
 
     struct C : S {};
-    static_assert(source_location_of(bases_of(^^C)[0]).line() ==
-                  std::source_location::current().line() - 2);
+    constexpr auto ctx = std::meta::access_context::current();
+    static_assert(source_location_of(bases_of(^^C, ctx)[0]).line() ==
+                  std::source_location::current().line() - 3);
 
     // Check that it works with aliases.
     using intAlias = int;

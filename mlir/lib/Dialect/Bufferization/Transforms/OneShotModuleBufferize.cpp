@@ -86,20 +86,6 @@ getOrCreateFuncAnalysisState(OneShotAnalysisState &state) {
   return state.addExtension<FuncAnalysisState>();
 }
 
-/// Return the unique ReturnOp that terminates `funcOp`.
-/// Return nullptr if there is no such unique ReturnOp.
-static func::ReturnOp getAssumedUniqueReturnOp(func::FuncOp funcOp) {
-  func::ReturnOp returnOp;
-  for (Block &b : funcOp.getBody()) {
-    if (auto candidateOp = dyn_cast<func::ReturnOp>(b.getTerminator())) {
-      if (returnOp)
-        return nullptr;
-      returnOp = candidateOp;
-    }
-  }
-  return returnOp;
-}
-
 namespace {
 
 /// Annotate IR with the results of the analysis. For testing purposes only.
@@ -146,24 +132,80 @@ aliasingFuncOpBBArgsAnalysis(FuncOp funcOp, OneShotAnalysisState &state,
     return success();
   }
 
-  // Support only single return-terminated block in the function.
-  func::ReturnOp returnOp = getAssumedUniqueReturnOp(funcOp);
-  assert(returnOp && "expected func with single return op");
+  // Find all func.return ops.
+  SmallVector<func::ReturnOp> returnOps = getReturnOps(funcOp);
+  assert(!returnOps.empty() && "expected at least one ReturnOp");
 
-  for (OpOperand &returnVal : returnOp->getOpOperands())
-    if (isa<RankedTensorType>(returnVal.get().getType()))
-      for (BlockArgument bbArg : funcOp.getArguments())
-        if (isa<RankedTensorType>(bbArg.getType())) {
-          int64_t returnIdx = returnVal.getOperandNumber();
-          int64_t bbArgIdx = bbArg.getArgNumber();
-          if (state.areEquivalentBufferizedValues(returnVal.get(), bbArg)) {
-            funcState.equivalentFuncArgs[funcOp][returnIdx] = bbArgIdx;
-            if (state.getOptions().testAnalysisOnly)
-              annotateEquivalentReturnBbArg(returnVal, bbArg);
+  // Build alias sets. Merge all aliases from all func.return ops.
+  for (BlockArgument bbArg : funcOp.getArguments()) {
+    if (isa<RankedTensorType>(bbArg.getType())) {
+      int64_t bbArgIdx = bbArg.getArgNumber();
+      // Store aliases in a set, so that we don't add the same alias twice.
+      SetVector<int64_t> aliases;
+      for (func::ReturnOp returnOp : returnOps) {
+        for (OpOperand &returnVal : returnOp->getOpOperands()) {
+          if (isa<RankedTensorType>(returnVal.get().getType())) {
+            int64_t returnIdx = returnVal.getOperandNumber();
+            if (state.areAliasingBufferizedValues(returnVal.get(), bbArg))
+              aliases.insert(returnIdx);
           }
-          if (state.areAliasingBufferizedValues(returnVal.get(), bbArg))
-            funcState.aliasingReturnVals[funcOp][bbArgIdx].push_back(returnIdx);
         }
+      }
+      for (int64_t alias : aliases)
+        funcState.aliasingReturnVals[funcOp][bbArgIdx].push_back(alias);
+    }
+  }
+
+  // Build equivalence sets.
+  // Helper function that finds an equivalent block argument index for the
+  // given OpOperand. Return std::nullopt if no equivalent block argument could
+  // be found.
+  auto findEquivalentBlockArgIdx =
+      [&](OpOperand &opOperand) -> std::optional<int64_t> {
+    Value v = opOperand.get();
+    if (!isa<TensorType>(v.getType()))
+      return std::nullopt;
+    for (BlockArgument bbArg : funcOp.getArguments()) {
+      if (isa<RankedTensorType>(bbArg.getType())) {
+        if (state.areEquivalentBufferizedValues(v, bbArg)) {
+          if (state.getOptions().testAnalysisOnly)
+            annotateEquivalentReturnBbArg(opOperand, bbArg);
+          return bbArg.getArgNumber();
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  int64_t numResults = returnOps.front()->getNumOperands();
+  for (int64_t i = 0; i < numResults; ++i) {
+    // Find the equivalent block argument index for the i-th operand of the
+    // first func.return op.
+    std::optional<int64_t> maybeEquiv =
+        findEquivalentBlockArgIdx(returnOps.front()->getOpOperand(i));
+    if (!maybeEquiv.has_value())
+      continue;
+    int64_t bbArgIdx = *maybeEquiv;
+    bool allEquiv = true;
+
+    // Check if all other func.return ops have the same equivalent block
+    // argument for the i-th operand. In contrast to aliasing information,
+    // which is just "merged", equivalence information must match across all
+    // func.return ops.
+    for (func::ReturnOp returnOp : ArrayRef(returnOps).drop_front()) {
+      std::optional<int64_t> maybeEquiv =
+          findEquivalentBlockArgIdx(returnOp->getOpOperand(i));
+      if (maybeEquiv != bbArgIdx) {
+        allEquiv = false;
+        break;
+      }
+    }
+
+    // All func.return ops have the same equivalent block argument for the i-th
+    // operand.
+    if (allEquiv)
+      funcState.equivalentFuncArgs[funcOp][i] = bbArgIdx;
+  }
 
   return success();
 }
@@ -247,35 +289,6 @@ static func::FuncOp getCalledFunction(func::CallOp callOp) {
       SymbolTable::lookupNearestSymbolFrom(callOp, sym));
 }
 
-/// Gather equivalence info of CallOps.
-/// Note: This only adds new equivalence info if the called function was already
-/// analyzed.
-// TODO: This does not handle cyclic function call graphs etc.
-static void equivalenceAnalysis(func::FuncOp funcOp,
-                                OneShotAnalysisState &state,
-                                FuncAnalysisState &funcState) {
-  funcOp->walk([&](func::CallOp callOp) {
-    func::FuncOp calledFunction = getCalledFunction(callOp);
-    assert(calledFunction && "could not retrieved called func::FuncOp");
-
-    // No equivalence info available for the called function.
-    if (!funcState.equivalentFuncArgs.count(calledFunction))
-      return WalkResult::skip();
-
-    for (auto it : funcState.equivalentFuncArgs[calledFunction]) {
-      int64_t returnIdx = it.first;
-      int64_t bbargIdx = it.second;
-      if (!state.isInPlace(callOp->getOpOperand(bbargIdx)))
-        continue;
-      Value returnVal = callOp.getResult(returnIdx);
-      Value argVal = callOp->getOperand(bbargIdx);
-      state.unionEquivalenceClasses(returnVal, argVal);
-    }
-
-    return WalkResult::advance();
-  });
-}
-
 /// Return "true" if the given function signature has tensor semantics.
 static bool hasTensorSignature(func::FuncOp funcOp) {
   return llvm::any_of(funcOp.getFunctionType().getInputs(),
@@ -287,7 +300,7 @@ static bool hasTensorSignature(func::FuncOp funcOp) {
 /// Store all functions of the `moduleOp` in `orderedFuncOps`, sorted by
 /// callee-caller order (i.e., callees without callers first). Store all
 /// remaining functions (i.e., the ones that call each other recursively) in
-/// `remainingFuncOps`.
+/// `remainingFuncOps`. Does not traverse nested symbol tables.
 ///
 /// Store the map of FuncOp to all its callers in `callerMap`.
 ///
@@ -301,18 +314,10 @@ static LogicalResult getFuncOpsOrderedByCalls(
   DenseMap<func::FuncOp, DenseSet<func::FuncOp>> calledBy;
   // For each FuncOp, the number of func::CallOp it contains.
   DenseMap<func::FuncOp, unsigned> numberCallOpsContainedInFuncOp;
-  WalkResult res = moduleOp.walk([&](func::FuncOp funcOp) -> WalkResult {
-    if (!funcOp.getBody().empty()) {
-      func::ReturnOp returnOp = getAssumedUniqueReturnOp(funcOp);
-      if (!returnOp)
-        return funcOp->emitError()
-               << "cannot bufferize a FuncOp with tensors and "
-                  "without a unique ReturnOp";
-    }
-
+  for (func::FuncOp funcOp : moduleOp.getOps<func::FuncOp>()) {
     // Collect function calls and populate the caller map.
     numberCallOpsContainedInFuncOp[funcOp] = 0;
-    return funcOp.walk([&](func::CallOp callOp) -> WalkResult {
+    WalkResult res = funcOp.walk([&](func::CallOp callOp) -> WalkResult {
       func::FuncOp calledFunction = getCalledFunction(callOp);
       assert(calledFunction && "could not retrieved called func::FuncOp");
       // If the called function does not have any tensors in its signature, then
@@ -326,9 +331,9 @@ static LogicalResult getFuncOpsOrderedByCalls(
       }
       return WalkResult::advance();
     });
-  });
-  if (res.wasInterrupted())
-    return failure();
+    if (res.wasInterrupted())
+      return failure();
+  }
 
   // Iteratively remove function operations that do not call any of the
   // functions remaining in the callCounter map and add them to ordered list.
@@ -351,6 +356,42 @@ static LogicalResult getFuncOpsOrderedByCalls(
   return success();
 }
 
+/// Helper function that extracts the source from a memref.cast. If the given
+/// value is not a memref.cast result, simply returns the given value.
+static Value unpackCast(Value v) {
+  auto castOp = v.getDefiningOp<memref::CastOp>();
+  if (!castOp)
+    return v;
+  return castOp.getSource();
+}
+
+/// Helper function that returns the return types (skipping casts) of the given
+/// func.return ops. This function returns as many types as the return ops have
+/// operands. If the i-th operand is not the same for all func.return ops, then
+/// the i-th returned type is an "empty" type.
+static SmallVector<Type> getReturnTypes(SmallVector<func::ReturnOp> returnOps) {
+  assert(!returnOps.empty() && "expected at least one ReturnOp");
+  int numOperands = returnOps.front()->getNumOperands();
+
+  // Helper function that unpacks memref.cast ops and returns the type.
+  auto getSourceType = [&](Value v) { return unpackCast(v).getType(); };
+
+  SmallVector<Type> result;
+  for (int i = 0; i < numOperands; ++i) {
+    // Get the type of the i-th operand of the first func.return ops.
+    Type t = getSourceType(returnOps.front()->getOperand(i));
+
+    // Check if all other func.return ops have a matching operand type.
+    for (int j = 1; j < static_cast<int>(returnOps.size()); ++j)
+      if (getSourceType(returnOps[j]->getOperand(i)) != t)
+        t = Type();
+
+    result.push_back(t);
+  }
+
+  return result;
+}
+
 /// Fold return values that are memref casts and update function return types.
 ///
 /// During FuncOp bufferization, the exact type of the returned memrefs (if any)
@@ -359,21 +400,33 @@ static LogicalResult getFuncOpsOrderedByCalls(
 /// entire function body, a more concise memref type can potentially be used for
 /// the return type of the function.
 static void foldMemRefCasts(func::FuncOp funcOp) {
+  // There is nothing to do for bodiless ops.
   if (funcOp.getBody().empty())
     return;
 
-  func::ReturnOp returnOp = getAssumedUniqueReturnOp(funcOp);
-  SmallVector<Type> resultTypes;
+  // Compute the common result types of all return ops.
+  SmallVector<func::ReturnOp> returnOps = getReturnOps(funcOp);
+  SmallVector<Type> resultTypes = getReturnTypes(returnOps);
 
-  for (OpOperand &operand : returnOp->getOpOperands()) {
-    if (auto castOp = operand.get().getDefiningOp<memref::CastOp>()) {
-      operand.set(castOp.getSource());
-      resultTypes.push_back(castOp.getSource().getType());
-    } else {
-      resultTypes.push_back(operand.get().getType());
+  // Remove direct casts.
+  for (func::ReturnOp returnOp : returnOps) {
+    for (OpOperand &operand : returnOp->getOpOperands()) {
+      // Bail if no common result type was found.
+      if (resultTypes[operand.getOperandNumber()]) {
+        operand.set(unpackCast(operand.get()));
+      }
     }
   }
 
+  // Fill in the missing result types that were not the same among all
+  // func.return ops.
+  for (int i = 0; i < static_cast<int>(resultTypes.size()); ++i) {
+    if (resultTypes[i])
+      continue;
+    resultTypes[i] = funcOp.getFunctionType().getResult(i);
+  }
+
+  // Update the function type.
   auto newFuncType = FunctionType::get(
       funcOp.getContext(), funcOp.getFunctionType().getInputs(), resultTypes);
   funcOp.setType(newFuncType);
@@ -411,9 +464,6 @@ mlir::bufferization::analyzeModuleOp(ModuleOp moduleOp,
     // Now analyzing function.
     funcState.startFunctionAnalysis(funcOp);
 
-    // Gather equivalence info for CallOps.
-    equivalenceAnalysis(funcOp, state, funcState);
-
     // Analyze funcOp.
     if (failed(analyzeOp(funcOp, state, statistics)))
       return failure();
@@ -432,9 +482,6 @@ mlir::bufferization::analyzeModuleOp(ModuleOp moduleOp,
     if (!state.getOptions().isOpAllowed(funcOp))
       continue;
 
-    // Gather equivalence info for CallOps.
-    equivalenceAnalysis(funcOp, state, funcState);
-
     // Analyze funcOp.
     if (failed(analyzeOp(funcOp, state, statistics)))
       return failure();
@@ -451,10 +498,10 @@ mlir::bufferization::analyzeModuleOp(ModuleOp moduleOp,
 
 void mlir::bufferization::removeBufferizationAttributesInModule(
     ModuleOp moduleOp) {
-  moduleOp.walk([&](func::FuncOp op) {
+  for (auto op : moduleOp.getOps<func::FuncOp>()) {
     for (BlockArgument bbArg : op.getArguments())
       removeBufferizationAttributes(bbArg);
-  });
+  }
 }
 
 LogicalResult mlir::bufferization::bufferizeModuleOp(
@@ -510,7 +557,7 @@ LogicalResult mlir::bufferization::bufferizeModuleOp(
   // Bufferize all other ops.
   for (Operation &op : llvm::make_early_inc_range(moduleOp.getOps())) {
     // Functions were already bufferized.
-    if (isa<func::FuncOp>(&op))
+    if (isa<func::FuncOp>(&op) || op.hasTrait<OpTrait::SymbolTable>())
       continue;
     if (failed(bufferizeOp(&op, options, statistics)))
       return failure();

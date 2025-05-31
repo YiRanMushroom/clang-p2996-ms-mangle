@@ -102,6 +102,10 @@ public:
   // Ensures that any implicit members of 'RD' have been declared.
   virtual void EnsureDeclarationOfImplicitMembers(CXXRecordDecl *RD) = 0;
 
+  // Ensures instantiation of the exception specification of 'FD'.
+  virtual void EnsureInstantiationOfExceptionSpec(SourceLocation Loc,
+                                                  FunctionDecl *FD) = 0;
+
   // Returns 'true' if the constraints of 'FD' are satisfied.
   // Otherwise, 'false'.
   virtual bool HasSatisfiedConstraints(FunctionDecl *FD) = 0;
@@ -120,35 +124,27 @@ public:
   // Synthesizes a member-access expression for 'Obj.Mem', eliding member
   // lookup.
   virtual Expr *
-  SynthesizeDirectMemberAccess(Expr *Obj, DeclRefExpr *Mem,
-                               ArrayRef<TemplateArgument> TArgs,
+  SynthesizeDirectMemberAccess(Expr *Obj, CXXReflectExpr *Mem,
                                SourceLocation PlaceholderLoc) = 0;
 
   // Synthesizes a call expression for 'Fn(Args...)'.
   virtual Expr *SynthesizeCallExpr(Expr *Fn, MutableArrayRef<Expr *> Args) = 0;
-
-                         // ==========================
-                         // Variable Injection Support
-                         // ==========================
-
-  // Broadcasts the existence of 'D' to downstream consumers (e.g., CodeGen).
-  virtual void BroadcastInjectedDecl(Decl *D) = 0;
-
-  // Attaches 'Init' as the initializer of 'VD'.
-  virtual void AttachInitializer(VarDecl *VD, Expr *Init) = 0;
-
-  // Returns a braced-init-list consisting of the expressions 'Inits'.
-  virtual Expr *CreateInitList(MutableArrayRef<Expr *> Inits,
-                               SourceRange Range) = 0;
 
                            // =======================
                            // Class Synthesis Support
                            // =======================
 
   // Returns a new definition of 'D' having the members specified by 'Mems'.
-  virtual CXXRecordDecl *DefineClass(CXXRecordDecl *IncompleteDecl,
-                                     ArrayRef<TagDataMemberSpec *> MemberSpecs,
-                                     SourceLocation DefinitionLoc) = 0;
+  virtual
+  CXXRecordDecl *DefineAggregate(CXXRecordDecl *IncompleteDecl,
+                                 ArrayRef<TagDataMemberSpec *> MemberSpecs,
+                                 Decl *ContainingDecl,
+                                 SourceLocation DefinitionLoc) = 0;
+
+  // Appertains the value represented by 'Value' as an annotation of 'Decl'.
+  virtual CXX26AnnotationAttr *Annotate(Decl *TargetDecl, const APValue &Value,
+                                        Decl *ContainingDecl,
+                                        SourceLocation DefinitionLoc) = 0;
 
                         // ============================
                         // Annotation Synthesis Support

@@ -98,14 +98,16 @@ class PseudoObjectExpr;
 class AtomicExpr;
 class CXXReflectExpr;
 class CXXMetafunctionExpr;
-class CXXSpliceSpecifierExpr;
 class CXXSpliceExpr;
 class CXXDependentMemberSpliceExpr;
 class CXXExpansionInitListExpr;
 class CXXExpansionInitListSelectExpr;
+class CXXIterableExpansionSelectExpr;
 class CXXDestructurableExpansionSelectExpr;
+class CXXIndeterminateExpansionSelectExpr;
 class StackLocationExpr;
 class ExtractLValueExpr;
+class ExplDependentCallExpr;
 class ArraySectionExpr;
 class OMPArrayShapingExpr;
 class OMPIteratorExpr;
@@ -205,15 +207,17 @@ ExprDependence computeDependence(AtomicExpr *E);
 
 ExprDependence computeDependence(CXXReflectExpr *E, const ASTContext &C);
 ExprDependence computeDependence(CXXMetafunctionExpr *E);
-ExprDependence computeDependence(CXXSpliceSpecifierExpr *E);
 ExprDependence computeDependence(CXXSpliceExpr *E);
 ExprDependence computeDependence(CXXDependentMemberSpliceExpr *E);
 ExprDependence computeDependence(StackLocationExpr *E);
 ExprDependence computeDependence(ExtractLValueExpr *E);
+ExprDependence computeDependence(ExplDependentCallExpr *E);
 
 ExprDependence computeDependence(CXXExpansionInitListExpr *E);
 ExprDependence computeDependence(CXXExpansionInitListSelectExpr *E);
+ExprDependence computeDependence(CXXIterableExpansionSelectExpr *E);
 ExprDependence computeDependence(CXXDestructurableExpansionSelectExpr *E);
+ExprDependence computeDependence(CXXIndeterminateExpansionSelectExpr *E);
 
 ExprDependence computeDependence(ArraySectionExpr *E);
 ExprDependence computeDependence(OMPArrayShapingExpr *E);

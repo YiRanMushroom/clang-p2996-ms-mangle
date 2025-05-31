@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 
 // <experimental/reflection>
@@ -22,7 +21,8 @@
 struct S { unsigned i:2, j:6; };
 
 consteval auto member_named(std::string_view name) {
-  for (std::meta::info field : nonstatic_data_members_of(^^S)) {
+  constexpr auto ctx = std::meta::access_context::current();
+  for (std::meta::info field : nonstatic_data_members_of(^^S, ctx)) {
     if (identifier_of(field) == name) return field;
   }
   std::unreachable();

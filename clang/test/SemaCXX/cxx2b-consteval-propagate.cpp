@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++2a -Wno-unused-value %s -verify
+// RUN: %clang_cc1 -std=c++2a -Wno-unused-value %s -verify=cxx2a,expected
 // RUN: %clang_cc1 -std=c++2b -Wno-unused-value %s -verify
 
 consteval int id(int i) { return i; }
@@ -332,15 +332,16 @@ S s(0); // expected-note {{in the default initializer of 'j'}}
 }
 
 namespace GH65985 {
-consteval int invalid(); // expected-note 2{{declared here}}
+consteval int invalid(); // expected-note {{declared here}} cxx2a-note {{declared here}}
 constexpr int escalating(auto) {
     return invalid();
-    // expected-note@-1 {{'escalating<int>' is an immediate function because its body contains a call to a consteval function 'invalid' and that call is not a constant expression}}
-    // expected-note@-2 2{{undefined function 'invalid' cannot be used in a constant expression}}
+    // cxx2a-note@-1 {{'escalating<int>' is an immediate function because its body contains a call to a consteval function 'invalid' and that call is not a constant expression}}
+    // expected-note@-2 {{undefined function 'invalid' cannot be used in a constant expression}} \
+    // cxx2a-note@-2 {{undefined function 'invalid' cannot be used in a constant expression}}
 }
 struct S {
-    static constexpr int a = escalating(0); // expected-note 2{{in call to}}
-    // expected-error@-1 {{call to immediate function 'GH65985::escalating<int>' is not a constant expression}}
+    static constexpr int a = escalating(0); // expected-note {{in call to}} cxx2a-note {{in call to}}
+    // cxx2a-error@-1 {{call to immediate function 'GH65985::escalating<int>' is not a constant expression}}
     // expected-error@-2 {{constexpr variable 'a' must be initialized by a constant expression}}
 };
 
@@ -348,19 +349,17 @@ struct S {
 
 namespace GH66324 {
 
-consteval int allocate();  // expected-note  2{{declared here}}
+consteval int allocate();  // expected-note  1{{declared here}}
 
 struct _Vector_base {
-  int b =  allocate(); // expected-note 2{{undefined function 'allocate' cannot be used in a constant expression}} \
-  // expected-error {{call to consteval function 'GH66324::allocate' is not a constant expression}} \
-  // expected-note  {{declared here}}
+  int b =  allocate(); // expected-note {{undefined function 'allocate' cannot be used in a constant expression}}
 };
 
 template <typename>
 struct vector : _Vector_base {
   constexpr vector()
   // expected-note@-1 {{'vector' is an immediate constructor because its body contains a call to a consteval function 'allocate' and that call is not a constant expression}}
-  : _Vector_base{} {} // expected-note {{in the default initializer of 'b'}}
+  : _Vector_base{} {}
 };
 
 vector<void> v{};
@@ -400,7 +399,7 @@ namespace lvalue_to_rvalue_init_from_heap {
 
 struct S {
     int *value;
-    constexpr S(int v) : value(new int {v}) {}  // expected-note 2 {{heap allocation performed here}}
+    constexpr S(int v) : value(new int {v}) {}  // expected-note 1 {{heap allocation performed here}}
     constexpr ~S() { delete value; }
 };
 consteval S fn() { return S(5); }
@@ -412,9 +411,7 @@ const int c = *fn().value;
 int d = *fn().value;
 
 constexpr int e = *fn().value + fn2(); // expected-error {{must be initialized by a constant expression}} \
-                                       // expected-error {{call to consteval function 'lvalue_to_rvalue_init_from_heap::fn' is not a constant expression}} \
-                                       // expected-note {{non-constexpr function 'fn2'}} \
-                                       // expected-note {{pointer to heap-allocated object}}
+                                       // expected-note {{non-constexpr function 'fn2'}}
 
 int f = *fn().value + fn2();  // expected-error {{call to consteval function 'lvalue_to_rvalue_init_from_heap::fn' is not a constant expression}} \
                               // expected-note {{pointer to heap-allocated object}}
@@ -495,4 +492,84 @@ struct Y {
 
 template void g<Y>();
 
+}
+
+namespace GH112677 {
+
+class ConstEval {
+ public:
+  consteval ConstEval(int); // expected-note 2{{declared here}}
+};
+
+struct TemplateCtor {
+    ConstEval val;
+    template <class Anything = int> constexpr
+    TemplateCtor(int arg) : val(arg) {} // expected-note {{undefined constructor 'ConstEval'}}
+};
+struct C : TemplateCtor {
+    using TemplateCtor::TemplateCtor; // expected-note {{in call to 'TemplateCtor<int>(0)'}}
+};
+
+C c(0); // expected-note{{in implicit initialization for inherited constructor of 'C'}}
+// expected-error@-1 {{call to immediate function 'GH112677::C::TemplateCtor' is not a constant expression}}
+
+struct SimpleCtor { constexpr SimpleCtor(int) {}};
+struct D : SimpleCtor {
+    int y = 10;
+    ConstEval x = y; // expected-note {{undefined constructor 'ConstEval'}}
+    using SimpleCtor::SimpleCtor;
+    //expected-note@-1 {{'SimpleCtor' is an immediate constructor because the default initializer of 'x' contains a call to a consteval constructor 'ConstEval' and that call is not a constant expression}}
+};
+
+D d(0); // expected-note {{in implicit initialization for inherited constructor of 'D'}}
+// expected-error@-1 {{call to immediate function 'GH112677::D::SimpleCtor' is not a constant expression}}
+
+}
+
+namespace GH123405 {
+
+consteval void fn() {}
+
+template <typename>
+constexpr auto tfn(int) {
+    auto p = &fn;  // expected-note {{'tfn<int>' is an immediate function because its body evaluates the address of a consteval function 'fn'}}
+    return p;
+}
+
+void g() {
+   int a; // expected-note {{declared here}}
+   tfn<int>(a); // expected-error {{call to immediate function 'GH123405::tfn<int>' is not a constant expression}}\
+                // expected-note {{read of non-const variable 'a' is not allowed in a constant expression}}
+}
+} // namespace GH123405
+
+namespace GH118000 {
+consteval int baz() { return 0;}
+struct S {
+    int mSize = baz();
+};
+
+consteval void bar() {
+    S s;
+}
+
+void foo() {
+    S s;
+}
+} // namespace GH118000
+
+namespace GH119046 {
+
+template <typename Cls> constexpr auto tfn(int) {
+  return (unsigned long long)(&Cls::sfn);
+  //expected-note@-1 {{'tfn<GH119046::S>' is an immediate function because its body evaluates the address of a consteval function 'sfn'}}
+};
+struct S { static consteval void sfn() {} };
+
+int f() {
+  int a = 0; // expected-note{{declared here}}
+  return tfn<S>(a);
+  //expected-error@-1 {{call to immediate function 'GH119046::tfn<GH119046::S>' is not a constant expression}}
+  //expected-note@-2 {{read of non-const variable 'a' is not allowed in a constant expression}}
+}
 }

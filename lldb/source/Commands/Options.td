@@ -324,6 +324,10 @@ let Command = "disassemble" in {
     Arg<"DisassemblyFlavor">, Desc<"Name of the disassembly flavor you want to "
     "use. Currently the only valid options are default, and for Intel "
     "architectures, att and intel.">;
+  def disassemble_options_cpu : Option<"cpu", "X">, Arg<"CPUName">,
+    Desc<"Override the CPU for disassembling.">;
+  def disassemble_options_features : Option<"features", "Y">, Arg<"CPUFeatures">,
+    Desc<"Specify additional CPU features for disassembling.">;
   def disassemble_options_arch : Option<"arch", "A">, Arg<"Architecture">,
     Desc<"Specify the architecture to use from cross disassembly.">;
   def disassemble_options_start_address : Option<"start-address", "s">,
@@ -961,6 +965,8 @@ let Command = "target modules show unwind" in {
   def target_modules_show_unwind_address : Option<"address", "a">, Group<2>,
     Arg<"AddressOrExpression">, Desc<"Show unwind instructions for a function "
     "or symbol containing an address">;
+  def target_modules_show_unwind_cached : Option<"cached", "c">,
+    Arg<"Boolean">, Desc<"Show cached unwind information">;
 }
 
 let Command = "target modules lookup" in {
@@ -1102,6 +1108,9 @@ let Command = "thread info" in {
     " JSON format.">;
   def thread_info_stop_info : Option<"stop-info", "s">, Desc<"Display the "
     "extended stop info in JSON format.">;
+  def thread_info_backing_thread : Option<"backing-thread", "b">,
+    Desc<"If this is an OS plugin thread, query the backing thread instead; has"
+    " no effect otherwise.">;
 }
 
 let Command = "thread return" in {

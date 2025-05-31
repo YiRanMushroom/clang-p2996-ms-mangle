@@ -42,6 +42,7 @@ template <typename T> class BasicReaderBase;
   class NamespaceDecl;
   struct PrintingPolicy;
   class Type;
+  class UsingShadowDecl;
   class ValueDecl;
   class QualType;
 
@@ -164,14 +165,13 @@ public:
 
     void Profile(llvm::FoldingSetNodeID &ID) const;
 
-    template <class T>
-    bool is() const { return Ptr.is<T>(); }
+    template <class T> bool is() const { return isa<T>(Ptr); }
 
-    template <class T>
-    T get() const { return Ptr.get<T>(); }
+    template <class T> T get() const { return cast<T>(Ptr); }
 
-    template <class T>
-    T dyn_cast() const { return Ptr.dyn_cast<T>(); }
+    template <class T> T dyn_cast() const {
+      return dyn_cast_if_present<T>(Ptr);
+    }
 
     void *getOpaqueValue() const;
 
@@ -256,6 +256,7 @@ public:
   struct NoLValuePath {};
   struct UninitArray {};
   struct UninitStruct {};
+  struct ConstexprUnknown {};
 
   template <typename Impl> friend class clang::serialization::BasicReaderBase;
   friend class ASTImporter;
@@ -263,6 +264,7 @@ public:
 
 private:
   ValueKind Kind;
+  bool AllowConstexprUnknown : 1;
 
   struct ComplexAPSInt {
     APSInt Real, Imag;
@@ -337,35 +339,52 @@ private:
   uint8_t ReflectionDepth;
 
 public:
+  bool allowConstexprUnknown() const { return AllowConstexprUnknown; }
+
+  void setConstexprUnknown(bool IsConstexprUnknown = true) {
+    AllowConstexprUnknown = IsConstexprUnknown;
+  }
+
   /// Creates an empty APValue of type None.
-  APValue() : Kind(None), UnderlyingTy(), ReflectionDepth() {}
+  APValue()
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {}
   /// Creates an integer APValue holding the given value.
-  explicit APValue(APSInt I) : Kind(None), UnderlyingTy(), ReflectionDepth() {
+  explicit APValue(APSInt I)
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeInt(); setInt(std::move(I));
   }
   /// Creates a float APValue holding the given value.
-  explicit APValue(APFloat F) : Kind(None), UnderlyingTy(), ReflectionDepth() {
+  explicit APValue(APFloat F)
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeFloat(); setFloat(std::move(F));
   }
   /// Creates a fixed-point APValue holding the given value.
   explicit APValue(APFixedPoint FX)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeFixedPoint(std::move(FX));
   }
   /// Creates a vector APValue with \p N elements. The elements
   /// are read from \p E.
   explicit APValue(const APValue *E, unsigned N)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeVector(); setVector(E, N);
   }
   /// Creates an integer complex APValue with the given real and imaginary
   /// values.
-  APValue(APSInt R, APSInt I) : Kind(None), UnderlyingTy(), ReflectionDepth() {
+  APValue(APSInt R, APSInt I)
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeComplexInt(); setComplexInt(std::move(R), std::move(I));
   }
   /// Creates a float complex APValue with the given real and imaginary values.
   APValue(APFloat R, APFloat I)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeComplexFloat(); setComplexFloat(std::move(R), std::move(I));
   }
   APValue(const APValue &RHS);
@@ -376,7 +395,8 @@ public:
   /// \param IsNullPtr Whether this lvalue is a null pointer.
   APValue(LValueBase Base, const CharUnits &Offset, NoLValuePath,
           bool IsNullPtr = false)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeLValue();
     setLValue(Base, Offset, NoLValuePath{}, IsNullPtr);
   }
@@ -390,17 +410,31 @@ public:
   APValue(LValueBase Base, const CharUnits &Offset,
           ArrayRef<LValuePathEntry> Path, bool OnePastTheEnd,
           bool IsNullPtr = false)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeLValue();
     setLValue(Base, Offset, Path, OnePastTheEnd, IsNullPtr);
   }
+  /// Creates a constexpr unknown lvalue APValue.
+  /// \param Base The base of the lvalue.
+  /// \param Offset The offset of the lvalue.
+  /// \param IsNullPtr Whether this lvalue is a null pointer.
+  APValue(LValueBase Base, const CharUnits &Offset, ConstexprUnknown,
+          bool IsNullPtr = false)
+      : Kind(None), AllowConstexprUnknown(true), UnderlyingTy(),
+        ReflectionDepth() {
+    MakeLValue();
+    setLValue(Base, Offset, NoLValuePath{}, IsNullPtr);
+  }
+
   /// Creates a new array APValue.
   /// \param UninitArray Marker. Pass an empty UninitArray.
   /// \param InitElts Number of elements you're going to initialize in the
   /// array.
   /// \param Size Full size of the array.
   APValue(UninitArray, unsigned InitElts, unsigned Size)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeArray(InitElts, Size);
   }
   /// Creates a new struct APValue.
@@ -408,7 +442,8 @@ public:
   /// \param NumBases Number of bases.
   /// \param NumMembers Number of members.
   APValue(UninitStruct, unsigned NumBases, unsigned NumMembers)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeStruct(NumBases, NumMembers);
   }
   /// Creates a new union APValue.
@@ -416,7 +451,8 @@ public:
   /// \param ActiveValue The value of the active union member.
   explicit APValue(const FieldDecl *ActiveDecl,
                    const APValue &ActiveValue = APValue())
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeUnion();
     setUnion(ActiveDecl, ActiveValue);
   }
@@ -426,18 +462,21 @@ public:
   /// \param Path The path of the member.
   APValue(const ValueDecl *Member, bool IsDerivedMember,
           ArrayRef<const CXXRecordDecl*> Path)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeMemberPointer(Member, IsDerivedMember, Path);
   }
   /// Creates a new address label diff APValue.
   /// \param LHSExpr The left-hand side of the difference.
   /// \param RHSExpr The right-hand side of the difference.
   APValue(const AddrLabelExpr* LHSExpr, const AddrLabelExpr* RHSExpr)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeAddrLabelDiff(); setAddrLabelDiff(LHSExpr, RHSExpr);
   }
   APValue(ReflectionKind RK, const void *Data)
-      : Kind(None), UnderlyingTy(), ReflectionDepth() {
+      : Kind(None), AllowConstexprUnknown(false), UnderlyingTy(),
+        ReflectionDepth() {
     MakeReflection(); setReflection(RK, Data);
   }
   static APValue IndeterminateValue() {
@@ -521,6 +560,9 @@ public:
   }
   bool isReflectedNamespace() const {
     return isReflection() && getReflectionKind() == ReflectionKind::Namespace;
+  }
+  bool isReflectedEntityProxy() const {
+    return isReflection() && getReflectionKind() == ReflectionKind::EntityProxy;
   }
   bool isReflectedBaseSpecifier() const {
     return isReflection() &&
@@ -720,6 +762,7 @@ public:
   ValueDecl *getReflectedDecl() const;
   const TemplateName getReflectedTemplate() const;
   Decl *getReflectedNamespace() const;
+  UsingShadowDecl *getReflectedEntityProxy() const;
   CXXBaseSpecifier *getReflectedBaseSpecifier() const;
   TagDataMemberSpec *getReflectedDataMemberSpec() const;
   CXX26AnnotationAttr *getReflectedAnnotation() const;

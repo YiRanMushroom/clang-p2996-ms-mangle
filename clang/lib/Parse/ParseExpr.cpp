@@ -250,6 +250,25 @@ ExprResult Parser::ParseArrayBoundExpression() {
   // If we parse the bound of a VLA... we parse a non-constant
   // constant-expression!
   Actions.ExprEvalContexts.back().InConditionallyConstantEvaluateContext = true;
+  // For a VLA type inside an unevaluated operator like:
+  //
+  //   sizeof(typeof(*(int (*)[N])array))
+  //
+  // N and array are supposed to be ODR-used.
+  // Initially when encountering `array`, it is deemed unevaluated and non-ODR
+  // used because that occurs before parsing the type cast. Therefore we use
+  // Sema::TransformToPotentiallyEvaluated() to rebuild the expression to ensure
+  // it's actually ODR-used.
+  //
+  // However, in other unevaluated contexts as in constraint substitution, it
+  // would end up rebuilding the type twice which is unnecessary. So we push up
+  // a flag to help distinguish these cases.
+  for (auto Iter = Actions.ExprEvalContexts.rbegin() + 1;
+       Iter != Actions.ExprEvalContexts.rend(); ++Iter) {
+    if (!Iter->isUnevaluated())
+      break;
+    Iter->InConditionallyConstantEvaluateContext = true;
+  }
   return ParseConstantExpressionInExprEvalContext(NotTypeCast);
 }
 
@@ -790,6 +809,7 @@ bool Parser::isRevertibleTypeTrait(const IdentifierInfo *II,
 
     REVERTIBLE_TYPE_TRAIT(__is_abstract);
     REVERTIBLE_TYPE_TRAIT(__is_aggregate);
+    REVERTIBLE_TYPE_TRAIT(__is_consteval_only);
     REVERTIBLE_TYPE_TRAIT(__is_arithmetic);
     REVERTIBLE_TYPE_TRAIT(__is_array);
     REVERTIBLE_TYPE_TRAIT(__is_assignable);
@@ -825,7 +845,6 @@ bool Parser::isRevertibleTypeTrait(const IdentifierInfo *II,
     REVERTIBLE_TYPE_TRAIT(__is_pointer);
     REVERTIBLE_TYPE_TRAIT(__is_polymorphic);
     REVERTIBLE_TYPE_TRAIT(__is_reference);
-    REVERTIBLE_TYPE_TRAIT(__is_referenceable);
     REVERTIBLE_TYPE_TRAIT(__is_rvalue_expr);
     REVERTIBLE_TYPE_TRAIT(__is_rvalue_reference);
     REVERTIBLE_TYPE_TRAIT(__is_same);
@@ -1047,6 +1066,7 @@ ExprResult Parser::ParseBuiltinPtrauthTypeDiscriminator() {
 ///
 /// [Clang] unary-type-trait:
 ///                   '__is_aggregate'
+///                   '__is_consteval_only'
 ///                   '__trivially_copyable'
 ///
 ///       binary-type-trait:
@@ -1221,7 +1241,7 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
         // If the token is not annotated, then it might be an expression pack
         // indexing
         if (!TryAnnotateTypeOrScopeToken() &&
-            Tok.is(tok::annot_pack_indexing_type))
+            Tok.isOneOf(tok::annot_pack_indexing_type, tok::annot_cxxscope))
           return ParseCastExpression(ParseKind, isAddressOfOperand, isTypeCast,
                                      isVectorLiteral, NotPrimaryExpression);
       }
@@ -1554,7 +1574,7 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
     Res = ParseUnaryExprOrTypeTraitExpression();
     break;
   case tok::caretcaret: {
-    if (!getLangOpts().Reflection || !getLangOpts().ReflectionNewSyntax) {
+    if (!getLangOpts().Reflection) {
       NotCastExpr = true;
       return ExprError();
     }
@@ -1719,22 +1739,50 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
   }
 
   case tok::kw_template: {
-    Token Next = NextToken();
-    if (!Next.is(tok::l_splice) || ParseCXXSpliceSpecifier(ConsumeToken())) {
+    SourceLocation TemplateKWLoc = ConsumeToken();
+
+    if (!Tok.is(tok::l_splice) ||
+        ParseSpliceSpecifier(/*TryParseSpecialization=*/true)) {
       NotCastExpr = true;
       return ExprError();
     }
-    [[fallthrough]];
+    SpliceResult SR = getSpliceAnnotation(Tok);
+    if (SR.isInvalid())
+      return ExprError();
+    SpliceSpecifier *Splice = SR.get();
+
+    if (Splice->isSpecialization() && NextToken().is(tok::coloncolon)) {
+      ConsumeAnnotationToken();
+
+      CXXScopeSpec SS;
+      if (Actions.ActOnCXXSpliceScopeSpecifier(SS, TemplateKWLoc, Splice,
+                                               Tok.getLocation()))
+        return ExprError();
+      ConsumeToken();
+      AnnotateScopeToken(SS, /*IsNewAnnotation=*/true);
+
+      return ParseCastExpression(ParseKind, isAddressOfOperand, NotCastExpr,
+                                 isTypeCast, isVectorLiteral,
+                                 NotPrimaryExpression, SourceLocation());
+    }
+
+    Res = ParseCXXSpliceAsExpr(TemplateKWLoc,
+                               /*AllowMemberReference=*/isAddressOfOperand);
+    break;
   }
 
   case tok::annot_splice: {
     // An 'annot_splice' was parsed by 'TryAnnotateTypeOrScopeToken', but it
     // could not be spliced as a type; it must be an expression.
-    Res = ParseCXXSpliceAsExpr(/*AllowMemberReference=*/isAddressOfOperand);
+    Res = ParseCXXSpliceAsExpr(SourceLocation(),
+                               /*AllowMemberReference=*/isAddressOfOperand);
     break;
   }
 
   case tok::l_splice:
+    if (ParseSpliceSpecifier())
+      return ExprError();
+    [[fallthrough]];
   case tok::annot_cxxscope: { // [C++] id-expression: qualified-id
     // If TryAnnotateTypeOrScopeToken annotates the token, tail recurse.
     // (We can end up in this situation after tentative parsing.)
@@ -1742,10 +1790,9 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
       return ExprError();
     }
     if (!Tok.is(tok::annot_cxxscope)) {
-      auto result = ParseCastExpression(ParseKind, isAddressOfOperand, NotCastExpr,
+      return ParseCastExpression(ParseKind, isAddressOfOperand, NotCastExpr,
                                  isTypeCast, isVectorLiteral,
                                  NotPrimaryExpression, TemplateKWLoc);
-      return result;
     }
 
     Token Next = NextToken();
@@ -1901,12 +1948,7 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
     return ParseObjCAtExpression(AtLoc);
   }
   case tok::caret:
-    // '-freflection' and '-fblocks' are mutually exclusive.
-    if (getLangOpts().Reflection && !getLangOpts().ReflectionNewSyntax) {
-        return ParseCXXReflectExpression(ConsumeToken());
-    } else {
-        Res = ParseBlockLiteralExpression();
-    }
+    Res = ParseBlockLiteralExpression();
     break;
   case tok::code_completion: {
     cutOffParsing();
@@ -2261,10 +2303,17 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
       };
       if (OpKind == tok::l_paren || !LHS.isInvalid()) {
         if (Tok.isNot(tok::r_paren)) {
-          if (ParseExpressionList(ArgExprs, [&] {
+          bool HasTrailingComma = false;
+          bool HasError = ParseExpressionList(
+              ArgExprs,
+              [&] {
                 PreferredType.enterFunctionArgument(Tok.getLocation(),
                                                     RunSignatureHelp);
-              })) {
+              },
+              /*FailImmediatelyOnInvalidExpr*/ false,
+              /*EarlyTypoCorrection*/ false, &HasTrailingComma);
+
+          if (HasError && !HasTrailingComma) {
             (void)Actions.CorrectDelayedTyposInExpr(LHS);
             // If we got an error when parsing expression list, we don't call
             // the CodeCompleteCall handler inside the parser. So call it here
@@ -2273,6 +2322,8 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
             if (PP.isCodeCompletionReached() && !CalledSignatureHelp)
               RunSignatureHelp();
             LHS = ExprError();
+          } else if (!HasError && HasTrailingComma) {
+            Diag(Tok, diag::err_expected_expression);
           } else if (LHS.isInvalid()) {
             for (auto &E : ArgExprs)
               Actions.CorrectDelayedTyposInExpr(E);
@@ -2326,8 +2377,10 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
       Expr* OrigLHS = !LHS.isInvalid() ? LHS.get() : nullptr;
       SourceLocation TemplateKWLoc;
 
-      if (Tok.is(tok::kw_template) && NextToken().is(tok::l_splice))
-        ParseCXXSpliceSpecifier(ConsumeToken());
+      if (Tok.is(tok::kw_template) && NextToken().is(tok::l_splice)) {
+        TemplateKWLoc = ConsumeToken();
+        ParseSpliceSpecifier(/*TryParseSpecialization=*/true);
+      }
 
       PreferredType.enterMemAccess(Actions, Tok.getLocation(), OrigLHS);
 
@@ -2419,17 +2472,22 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
         SourceLocation Loc = ConsumeToken();
         Name.setIdentifier(Id, Loc);
       } else if (Tok.is(tok::annot_splice)) {
-        ExprResult Res = ParseCXXSpliceAsExpr(/*AllowMemberReference=*/true);
-        if (!Res.isInvalid() && !Diags.hasErrorOccurred()) {
-          LHS = Actions.ActOnMemberAccessExpr(
-                getCurScope(), LHS.get(), OpLoc, OpKind,
-                cast<CXXSpliceExpr>(Res.get()), TemplateKWLoc);
-          if (!LHS.isInvalid() && Tok.is(tok::less))
+        ExprResult Res = ParseCXXSpliceAsExpr(TemplateKWLoc,
+                                              /*AllowMemberReference=*/true);
+        if (!Res.isInvalid()) {
+          LHS = Actions.ActOnMemberAccessExpr(getCurScope(), LHS.get(), OpLoc,
+                                              OpKind,
+                                              cast<CXXSpliceExpr>(Res.get()));
+          if (LHS.isInvalid())
+            // Preserve the LHS if the RHS is an invalid member.
+            LHS = Actions.CreateRecoveryExpr(OrigLHS->getBeginLoc(),
+                                             Name.getEndLoc(), {OrigLHS});
+          else if (Tok.is(tok::less))
             checkPotentialAngleBracket(LHS);
-          break;
         } else {
           LHS = ExprError();
         }
+        break;
       } else if (ParseUnqualifiedId(
                      SS, ObjectType, LHS.get() && LHS.get()->containsErrors(),
                      /*EnteringContext=*/false,
@@ -2651,7 +2709,7 @@ ExprResult Parser::ParseUnaryExprOrTypeTraitExpression() {
                      tok::kw_alignof, tok::kw__Alignof, tok::kw_vec_step,
                      tok::kw___builtin_omp_required_simd_align,
                      tok::kw___builtin_vectorelements) ||
-         (getLangOpts().ReflectionNewSyntax && Tok.is(tok::caretcaret))) &&
+         (getLangOpts().Reflection && Tok.is(tok::caretcaret))) &&
          "Not a sizeof/alignof/vec_step expression!");
   Token OpTok = Tok;
   ConsumeToken();
@@ -3744,7 +3802,8 @@ void Parser::injectEmbedTokens() {
 bool Parser::ParseExpressionList(SmallVectorImpl<Expr *> &Exprs,
                                  llvm::function_ref<void()> ExpressionStarts,
                                  bool FailImmediatelyOnInvalidExpr,
-                                 bool EarlyTypoCorrection) {
+                                 bool EarlyTypoCorrection,
+                                 bool *HasTrailingComma) {
   bool SawError = false;
   while (true) {
     if (ExpressionStarts)
@@ -3787,6 +3846,12 @@ bool Parser::ParseExpressionList(SmallVectorImpl<Expr *> &Exprs,
     Token Comma = Tok;
     ConsumeToken();
     checkPotentialAngleBracketDelimiter(Comma);
+
+    if (Tok.is(tok::r_paren)) {
+      if (HasTrailingComma)
+        *HasTrailingComma = true;
+      break;
+    }
   }
   if (SawError) {
     // Ensure typos get diagnosed when errors were encountered while parsing the

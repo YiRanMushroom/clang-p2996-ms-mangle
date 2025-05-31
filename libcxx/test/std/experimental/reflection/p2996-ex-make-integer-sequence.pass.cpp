@@ -10,7 +10,6 @@
 
 // UNSUPPORTED: c++03 || c++11 || c++14 || c++17 || c++20
 // ADDITIONAL_COMPILE_FLAGS: -freflection
-// ADDITIONAL_COMPILE_FLAGS: -freflection-new-syntax
 // ADDITIONAL_COMPILE_FLAGS: -Wno-inconsistent-missing-override
 
 // <experimental/reflection>
@@ -26,7 +25,7 @@ template<typename T>
 consteval std::meta::info make_integer_seq_refl(T N) {
   std::vector args{^^T};
   for (T k = 0; k < N; ++k) {
-    args.push_back(std::meta::reflect_value(k));
+    args.push_back(std::meta::reflect_constant(k));
   }
   return substitute(^^std::integer_sequence, args);
 }
